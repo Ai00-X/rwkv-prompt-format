@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "RWKV G1/G1x prompt format checker and auto-fixer (Rust lib + JSON CLI + C ABI)"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/ai00-x/rwkv-prompt-format"
+readme = "README.md"
 keywords = ["rwkv", "prompt", "format", "linter"]
 categories = ["development-tools", "text-processing"]
 

@@ -1,48 +1,85 @@
 # rwkv-prompt-format
 
-RWKV G1/G1x 提示词**格式检查器 + 自动修复器**，独立于推理运行时：纯文本输入，
-不加载模型、不碰 GPU、不读写磁盘。六种消费方式：
+English | [简体中文](README.zh-CN.md)
 
-| 方式 | 适用 | 产物 |
+![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)
+![Rust](https://img.shields.io/badge/rust-edition%202024-orange)
+![Node](https://img.shields.io/badge/node-%E2%89%A518-green)
+![WASM](https://img.shields.io/badge/wasm-203%20KB-purple)
+
+A **format checker and auto-fixer for RWKV G1/G1x prompts**. It is independent of the
+inference runtime: it takes plain text, never loads a model, never touches a GPU, and
+never reads or writes files. Six ways to consume it:
+
+| Form | Best for | Artifact |
 |---|---|---|
-| JSON CLI | 任何语言、脚本、CI | `rwkv-pf(.exe)` |
-| C ABI | C/C++/Rust/任意 FFI 封装 | `rwkv_prompt_format.dll` / `.so` / `.dylib` |
-| 薄封装 | Python / Node / Go / Java / C# | 见 `bindings/` |
-| WASM | Node / 浏览器 / Edge / 任意 WASM 宿主 | `wasm/rwkv_prompt_format.wasm` + `wasm/index.mjs` |
-| MCP | Qoder / Claude Desktop 等 AI agent | `mcp/server.mjs`（零依赖 stdio） |
-| Skill | AI agent 的触发规则与工作流 | `skills/rwkv-prompt-format/` |
+| JSON CLI | Any language, scripts, CI | `rwkv-pf(.exe)` |
+| C ABI | C/C++/Rust or any FFI wrapper | `rwkv_prompt_format.dll` / `.so` / `.dylib` |
+| Thin bindings | Python / Node / Go / Java / C# | see `bindings/` |
+| WASM | Node / browsers / edge / any WASM host | `wasm/rwkv_prompt_format.wasm` + `wasm/index.mjs` |
+| MCP | Qoder, Claude Desktop, and other AI agents | `mcp/server.mjs` (zero-dependency stdio) |
+| Skill | Trigger rules and workflow for AI agents | `skills/rwkv-prompt-format/` |
 
-规则来自官方模板（[BlinkDL/RWKV-LM · RWKV7-G1x-templates.txt](https://github.com/BlinkDL/RWKV-LM/blob/main/RWKV-v7/RWKV7-G1x-templates.txt)），
-而不是本仓的猜测。要点：
+The rules come from the official templates
+([BlinkDL/RWKV-LM · RWKV7-G1x-templates.txt](https://github.com/BlinkDL/RWKV-LM/blob/main/RWKV-v7/RWKV7-G1x-templates.txt)),
+not from guesses. The essentials:
 
-- 块之间**恰好一个空行**（`\n\n`）；空行不能出现在块内容里。
-- 标签与关键字**大小写敏感**：`System:` / `User:` / `Assistant:` / `Instruction:` /
-  `Input:` / `Response:` / `Tools:` / `<think` / `<think></think` / `(think)`。
-- 生成点必须是 `Assistant:`（chat）或 `Response:`（instruction），且位于末尾。
-- 官方材料模板是 `User:\n材料：…\n问题：…\n\nAssistant: {"answer": `（标签后换行）。
+- Blocks are separated by **exactly one blank line** (`\n\n`); a blank line must never
+  appear inside block content.
+- Labels and keywords are **case-sensitive**: `System:` / `User:` / `Assistant:` /
+  `Instruction:` / `Input:` / `Response:` / `Tools:` / `<think` / `<think></think` /
+  `(think)`.
+- The generation point must be `Assistant:` (chat) or `Response:` (instruction), and it
+  must be last.
+- The official material template is
+  `User:\n材料：…\n问题：…\n\nAssistant: {"answer": ` (content starts on the next line).
 
-## 构建
+## Quick start
+
+```bash
+git clone https://github.com/ai00-x/rwkv-prompt-format.git
+cd rwkv-prompt-format
+cargo build --release
+
+# Check a prompt (exit code 1 if errors remain)
+printf 'User: hi\n\n\nAssistant:' | ./target/release/rwkv-pf check --stdin
+
+# Fix it to stdout
+printf 'User: hi\n\n\nAssistant:' | ./target/release/rwkv-pf fix --stdin
+```
+
+No Rust toolchain? The WASM build runs on Node 18+ with no dependencies:
+
+```bash
+printf 'user : hi\n\n\nassistant : ' | node wasm/cli.mjs fix --stdin
+```
+
+For AI agents, jump to [MCP server](#mcp-server) or
+[agent skill and one-prompt install](#agent-skill-and-one-prompt-install).
+
+## Build
 
 ```bash
 cd rwkv-prompt-format
 cargo build --release
-cargo fmt --all && cargo clippy --all-targets -- -D warnings   # 仓库硬规则
+cargo fmt --all && cargo clippy --all-targets -- -D warnings   # repository gate
 
-# WASM（需要 rustup target add wasm32-unknown-unknown）
-node scripts/build-wasm.mjs          # 构建并复制到 wasm/
-node scripts/build-wasm.mjs --check  # CI：产物过期则退出码 1
+# WASM (requires: rustup target add wasm32-unknown-unknown)
+node scripts/build-wasm.mjs          # build and copy into wasm/
+node scripts/build-wasm.mjs --check  # CI: exit 1 if the committed artifact is stale
 ```
 
-产物（`target/release/`）：
+Artifacts in `target/release/`:
 
-- `rwkv-pf` / `.exe` —— CLI（包名 `rwkv-prompt-format`，可执行文件取短名避免与库产物同名）
-- `rwkv_prompt_format.dll`（Windows）/ `librwkv_prompt_format.so`（Linux）/
-  `librwkv_prompt_format.dylib`（macOS）—— C ABI 动态库
-- `rwkv_prompt_format.lib` / `librwkv_prompt_format.a` —— 静态/导入库
-- 头文件：`include/rwkv_prompt_format.h`
+- `rwkv-pf` / `.exe` — CLI (the package is `rwkv-prompt-format`; the binary uses the
+  short name so it does not collide with the library artifact)
+- `rwkv_prompt_format.dll` (Windows) / `librwkv_prompt_format.so` (Linux) /
+  `librwkv_prompt_format.dylib` (macOS) — C ABI dynamic library
+- `rwkv_prompt_format.lib` / `librwkv_prompt_format.a` — static/import library
+- header: `include/rwkv_prompt_format.h`
 
-WASM 产物固定为 `wasm/rwkv_prompt_format.wasm`（约 203 KB，无任何 import），
-`wasm/index.mjs` 是零依赖封装。
+The WASM artifact is always `wasm/rwkv_prompt_format.wasm` (about 203 KB, no imports);
+`wasm/index.mjs` is a zero-dependency wrapper.
 
 ## CLI
 
@@ -54,24 +91,25 @@ rwkv-pf fix   --file prompt.txt --in-place
 cat chatml.txt | rwkv-pf fix --stdin > g1.txt
 ```
 
-`check` 与 `fix` 都支持 `--file PATH` / `--text TEXT` / `--stdin`（三选一）、
-`--json`、`--no-fail`。`fix` 另有：
+Both `check` and `fix` accept `--file PATH` / `--text TEXT` / `--stdin` (exactly one),
+`--json`, and `--no-fail`. `fix` also supports:
 
-| 参数 | 含义 |
+| Flag | Meaning |
 |---|---|
-| `--safe-only` | 只做安全修复，不改结构 |
-| `--structural-only` | 只做结构修复（转换/合并/补生成点）；标签与空白仍按官方写法渲染 |
-| `--strip-metadata` | 去掉行首 `[seg 12 · user]` 记忆元数据前缀（默认关，内容编辑） |
-| `--in-place` | 写回 `--file`（需配 `--file`） |
-| `--quiet` | 不打印 stderr 摘要 |
+| `--safe-only` | Safe repairs only; never changes structure |
+| `--structural-only` | Structural repairs only (convert/merge/add generation point); labels and whitespace are still rendered canonically |
+| `--strip-metadata` | Drop leading `[seg 12 · user]` memory-metadata prefixes (off by default; this edits content) |
+| `--in-place` | Write back to `--file` (requires `--file`) |
+| `--quiet` | Suppress the stderr summary |
 
-退出码：`0` 成功；`1` 检查/修复后仍有 error（`--no-fail` 可关）；`2` 读文件或参数错误。
+Exit codes: `0` success; `1` errors remain after check/fix (`--no-fail` disables);
+`2` file or argument error.
 
-默认 `fix` 把修复后的文本写到 stdout，把摘要写到 stderr；`--json` 时 stdout 是
-`FixResult` JSON，摘要仍在 stderr。`--quiet` 关闭摘要，因此
-`cat x | rwkv-pf fix --stdin > y` 是安全的。
+By default `fix` writes the repaired text to stdout and the summary to stderr. With
+`--json`, stdout is a `FixResult` JSON document and the summary stays on stderr.
+`--quiet` removes the summary, so `cat x | rwkv-pf fix --stdin > y` is safe.
 
-### 人读输出
+### Human-readable output
 
 ```
 OK（0 error / 0 warn）· 格式 plain_chat · 生成点 L5 assistant
@@ -80,9 +118,13 @@ OK（0 error / 0 warn）· 格式 plain_chat · 生成点 L5 assistant
 ✓ 未发现格式问题
 ```
 
-有 finding 时逐条给出 `L行号 [级别] 代码 说明`，下一行 `│` 是证据原文。
+Findings are printed one per line as `L<line> [severity] <code> <message>`, followed by
+a `│` line with the original evidence.
 
-### JSON：`FormatReport`
+> The human-readable summary and finding messages are currently in Chinese. Use
+> `--json` and `findings[].code` for locale-independent automation.
+
+### JSON: `FormatReport`
 
 ```json
 {
@@ -112,14 +154,15 @@ OK（0 error / 0 warn）· 格式 plain_chat · 生成点 L5 assistant
 }
 ```
 
-- `format`：`plain_chat` / `material_qa` / `instruction` / `instruction_chat` /
-  `system_tools` / `chatml` / `markdown` / `jsonl` / `continuation` / `unknown`。
-- `line` 从 1 开始；`0` 表示整段文本级问题。
-- `severity`：`error` / `warn` / `info`。`ok == (error_count == 0)`。
-- `code` 是稳定规则码（如 `MULTIPLE_SYSTEM`、`BLANK_LINE_IN_CONTENT`、
-  `THINK_MALFORMED`），可直接用于 CI 白名单或统计。
+- `format`: `plain_chat` / `material_qa` / `instruction` / `instruction_chat` /
+  `system_tools` / `chatml` / `markdown` / `jsonl` / `continuation` / `unknown`.
+- `line` is 1-based; `0` means a whole-text finding.
+- `severity`: `error` / `warn` / `info`. `ok == (error_count == 0)`.
+- `code` is a stable rule code (for example `MULTIPLE_SYSTEM`,
+  `BLANK_LINE_IN_CONTENT`, `THINK_MALFORMED`) and is safe to use in CI allowlists or
+  metrics.
 
-### JSON：`FixResult`
+### JSON: `FixResult`
 
 ```json
 {
@@ -133,52 +176,65 @@ OK（0 error / 0 warn）· 格式 plain_chat · 生成点 L5 assistant
 }
 ```
 
-`applied` 是**修复前后两次检测的差值**，不是修复器自报：只有真正消失的 error/warn
-才会出现。`after` 是同一检测器对 `text` 的复检，`after.ok` 为 false 时说明还有
-无法自动修复的内容（见 `after.findings` 与 `notes`）。
+`applied` is the **difference between two checks** (before and after), not a
+self-report from the fixer: only errors/warnings that actually disappeared appear
+there. `after` is the same checker run against `text`. If `after.ok` is false,
+something could not be repaired automatically; see `after.findings` and `notes`.
 
-## 自动修复做什么
+## What the fixer does
 
-**安全修复**（`--safe-only`，`FIX_SAFE`）：
+**Safe repairs** (`--safe-only`, `FIX_SAFE`):
 
-- BOM、CRLF/CR → LF；
-- 标签大小写、缩进、行内多余空格、全角冒号、冒号前空格；
-- 块间空行数量、内容里的空行、末尾空行、首部空行；
-- `Tools:` 的大小写/冒号/位置；
-- think 前缀（`<THINK>`、`<think >`、`<think>\n</think>` 等 → 官方形式）；
-- `(think)` / `( think )` / `(Think a bit)` 等提示 → 句末唯一的官方写法；
-- 未闭合的 ``` 围栏补一行闭合（`UNCLOSED_CODE_FENCE`），围栏内文本不动。
+- BOM, CRLF/CR → LF;
+- label case, indentation, extra inline spaces, full-width colons, spaces before colons;
+- blank-line counts between blocks, blank lines inside content, trailing/leading blank
+  lines;
+- `Tools:` case/colon/position;
+- think prefixes (`<THINK>`, `<think >`, `<think>\n</think>`, etc. → the official form);
+- think hints (`(think)`, `( think )`, `(Think a bit)`, etc. → one canonical hint at the
+  end of the sentence);
+- adds the closing line for an unclosed ``` fence (`UNCLOSED_CODE_FENCE`); text inside
+  the fence is untouched.
 
-文件末尾换行**按原样保留**：原来有就保留，没有就不加。修复器不替调用方决定
-文件级换行策略。
+The final newline is **preserved as-is**: if the input had one, it stays; if not, none is
+added. The fixer does not make file-level newline decisions for the caller.
 
-**结构修复**（`--structural-only`，`FIX_STRUCTURAL`）：
+**Structural repairs** (`--structural-only`, `FIX_STRUCTURAL`):
 
-- ChatML（`<|im_start|>`…`<|im_end|>`）、Llama 3（`<|start_header_id|>`…）、
-  JSONL（每行 `{"role","content"}` 或整个 JSON 数组/`{"messages":[…]}`）、
-  Markdown（`## User`、`**User:**`、`> User:` 等）→ G1 plain；
-  只转换**行首**的模板标记；`User: <|im_start|>user` 这种行内标记视为正文，
-  不拆块（避免把内容改乱），检测器会报 `FOREIGN_MARKER`；
-  `- User: …` 这类列表项也是正文，不当 Markdown 角色行；
-- `Human:` / `AI:` / `Question:` / `Answer:` → 官方标签；
-- 多个 `System:` 合并为一个（含 `Tools:` 时置顶并给出复核说明）；
-- 连续同角色块合并；
-- Instruction 块重排为 `System → Instruction → Input → Response`；
-- 末尾缺生成点时补 `Assistant:` / `Response:`；
-- 无任何标签的纯文本 → `User:` + 生成点；有标签前的散落文本 → 并入 `System:`；
-- 末尾续写标签（`English:` / `English: A principios` 等 12 种语言名）单独保留为
-  生成点，不与上一块的空行折叠；检测器把「对话 + 末尾续写标签」归为
-  `format=continuation`。
+- ChatML (`<|im_start|>`…`<|im_end|>`), Llama 3 (`<|start_header_id|>`…), JSONL (one
+  `{"role","content"}` object per line, or a JSON array / `{"messages":[…]}`), and
+  Markdown (`## User`, `**User:**`, `> User:`, etc.) → G1 plain;
+  only **line-leading** template markers are converted. An inline marker such as
+  `User: <|im_start|>user` is treated as content and not split into blocks (to avoid
+  mangling text); the checker reports `FOREIGN_MARKER`. List items like `- User: …`
+  are content, not Markdown role lines;
+- `Human:` / `AI:` / `Question:` / `Answer:` → official labels;
+- multiple `System:` blocks are merged into one (when `Tools:` is present it is moved to
+  the top and a review note is emitted);
+- consecutive same-role blocks are merged;
+- instruction blocks are reordered to `System → Instruction → Input → Response`;
+- a missing generation point is appended (`Assistant:` / `Response:`);
+- tagless plain text → `User:` + generation point; stray text before the first label is
+  folded into `System:`;
+- a trailing continuation label (`English:`, `English: A principios`, and 12 language
+  names in total) is kept as its own generation point and is not merged with the
+  preceding block. The checker classifies "dialogue + trailing continuation label" as
+  `format=continuation`.
 
-**不做**的事（有意为之）：
+**Deliberately not done**:
 
-- 不改写语义内容、不摘要、不翻译；`--strip-metadata` 是唯一的内容编辑，默认关。
-- 不把 `Assistant:` 后面已经 seed 的内容（如 `{"answer": `）并到别的块，也不吃掉
-  末尾 seed 空格；`Assistant:\n材料…` 这类原布局会保留。
-- 不转换 Llama 2 `[INST]`、不猜没见过的私有模板（会给出 `notes` 说明）；
-- 不保证语义上「正确」——它保证**符合官方模板的语法**。
+- No semantic rewriting, summarizing, or translation. `--strip-metadata` is the only
+  content edit, and it is off by default.
+- Seeded content after `Assistant:` (such as `{"answer": `) is never merged into another
+  block, and the trailing seed space is preserved; layouts like `Assistant:\n材料…` stay
+  as they are.
+- Llama 2 `[INST]` and unknown private templates are not guessed (a `notes` entry
+  explains why).
+- It does not guarantee semantic correctness — it guarantees **syntax that matches the
+  official template**.
 
-修复器是确定性的、幂等的：`fix(fix(x)) == fix(x)`，测试覆盖所有转换路径。
+The fixer is deterministic and idempotent: `fix(fix(x)) == fix(x)`, with tests covering
+every conversion path.
 
 ## C ABI
 
@@ -188,42 +244,45 @@ OK（0 error / 0 warn）· 格式 plain_chat · 生成点 L5 assistant
 char *json = rwkv_pf_check(text);            /* FormatReport JSON */
 char *fixed = rwkv_pf_fix_text(text, RWKV_PF_FIX_SAFE | RWKV_PF_FIX_STRUCTURAL);
 if (fixed) { fputs(fixed, stdout); }
-rwkv_pf_free_string(fixed);                  /* 必须用本库释放，不能 free() */
+rwkv_pf_free_string(fixed);                  /* must be freed by this library, not free() */
 rwkv_pf_free_string(json);
 ```
 
-| 符号 | 说明 |
+| Symbol | Description |
 |---|---|
-| `const char *rwkv_pf_version(void)` | 版本号，静态内存，不要释放 |
-| `char *rwkv_pf_check(const char *text)` | 返回报告 JSON；错误返回 `{"error":"…"}` |
-| `char *rwkv_pf_fix(const char *text, uint32_t flags)` | 返回 `FixResult` JSON（含 `text`） |
-| `char *rwkv_pf_fix_text(const char *text, uint32_t flags)` | 只返回修复文本；失败返回 NULL |
-| `void rwkv_pf_free_string(char *ptr)` | 释放上述返回串；NULL 是 no-op |
+| `const char *rwkv_pf_version(void)` | Version string in static memory; do not free |
+| `char *rwkv_pf_check(const char *text)` | Returns report JSON; errors return `{"error":"…"}` |
+| `char *rwkv_pf_fix(const char *text, uint32_t flags)` | Returns `FixResult` JSON (including `text`) |
+| `char *rwkv_pf_fix_text(const char *text, uint32_t flags)` | Returns only the repaired text; NULL on failure |
+| `void rwkv_pf_free_string(char *ptr)` | Frees the strings above; NULL is a no-op |
 
-- 全部是纯函数，可并发调用；内部 `catch_unwind`，panic 不会跨 FFI 边界。
-- 输入必须是有效 UTF-8；JSON 接口对 NULL/非 UTF-8 返回 `{"error":…}`，便于封装统一处理。
-- 所有堆字符串都由本库分配、必须由本库释放（Windows 下跨 CRT 的 `free()` 会崩）。
+- All functions are pure and safe to call concurrently; panics are caught with
+  `catch_unwind` and never cross the FFI boundary.
+- Input must be valid UTF-8. The JSON functions return `{"error":…}` for NULL/invalid
+  UTF-8 so wrappers can handle failures uniformly.
+- Every heap string is allocated by this library and must be freed by this library
+  (calling `free()` across CRTs on Windows crashes).
 
-## 多语言封装
+## Language bindings
 
-| 语言 | 文件 | 传输 | 状态 |
+| Language | File | Transport | Status |
 |---|---|---|---|
-| Python | `bindings/python/rwkv_prompt_format.py` | ctypes | ✅ 已测（Python 3.12；兼容 3.8+） |
-| Node.js | `bindings/node/index.js` + `index.d.ts` | [koffi](https://koffi.dev) FFI | ✅ 已测（Node 22 + koffi 3.3.3） |
-| Go | `bindings/go/` | JSON CLI（`os/exec`，无 cgo） | ✅ 已测（Go 1.25） |
-| Java | `bindings/java/ai00x/rwkv/RwkvPromptFormat.java` | JNA | ⚠️ 未运行验证（本机无 JDK） |
-| C# | `bindings/csharp/RwkvPromptFormat.cs` | P/Invoke | ⚠️ 未运行验证（本机无 .NET） |
-| 其它 | CLI | `--json` | 任何能起子进程的语言 |
+| Python | `bindings/python/rwkv_prompt_format.py` | ctypes | ✅ tested (Python 3.12; 3.8+ compatible) |
+| Node.js | `bindings/node/index.js` + `index.d.ts` | [koffi](https://koffi.dev) FFI | ✅ tested (Node 22 + koffi 3.3.3) |
+| Go | `bindings/go/` | JSON CLI (`os/exec`, no cgo) | ✅ tested (Go 1.25) |
+| Java | `bindings/java/ai00x/rwkv/RwkvPromptFormat.java` | JNA | ⚠️ not run yet (no JDK on the dev machine) |
+| C# | `bindings/csharp/RwkvPromptFormat.cs` | P/Invoke | ⚠️ not run yet (no .NET on the dev machine) |
+| Anything else | CLI | `--json` | Any language that can spawn a process |
 
 ```python
-from rwkv_prompt_format import check, fix          # RWKV_PROMPT_FORMAT_LIB 可指定库路径
+from rwkv_prompt_format import check, fix          # RWKV_PROMPT_FORMAT_LIB selects the library
 report = check(text)
 if not report["ok"]:
     text = fix(text)["text"]
 ```
 
 ```js
-const pf = require('./bindings/node');             // 需要 pnpm add koffi
+const pf = require('./bindings/node');             // requires pnpm add koffi
 const report = pf.check(text);
 const fixed = pf.fixText(text);
 ```
@@ -231,7 +290,7 @@ const fixed = pf.fixText(text);
 ```go
 import rwkvpf "github.com/ai00-x/rwkv-prompt-format/bindings/go"
 
-report, err := rwkvpf.Check(text)                  // RWKV_PROMPT_FORMAT_CLI 或 PATH
+report, err := rwkvpf.Check(text)                  // RWKV_PROMPT_FORMAT_CLI or PATH
 fixed, err := rwkvpf.FixText(text, rwkvpf.FixAll)
 ```
 
@@ -247,22 +306,24 @@ string fixed  = RwkvPromptFormat.FixText(text);
 
 ## WASM
 
-同一份 Rust 核心编译成 `wasm32-unknown-unknown`，复用 C ABI 的
-`rwkv_pf_check/fix/fix_text/free_string`，另加三个只给 WASM 用的导出：
+The same Rust core is compiled to `wasm32-unknown-unknown`. It reuses the C ABI
+(`rwkv_pf_check/fix/fix_text/free_string`) and adds three WASM-only exports:
 
-| 导出 | 说明 |
+| Export | Description |
 |---|---|
-| `rwkv_pf_wasm_alloc(len) -> ptr` | 分配 `len` 字节（零填充），给输入串用 |
-| `rwkv_pf_wasm_free(ptr, len)` | 释放输入缓冲区 |
-| `rwkv_pf_wasm_abi() -> u32` | ABI 版本，当前 `1` |
+| `rwkv_pf_wasm_alloc(len) -> ptr` | Allocate `len` zero-filled bytes for the input string |
+| `rwkv_pf_wasm_free(ptr, len)` | Free the input buffer |
+| `rwkv_pf_wasm_abi() -> u32` | ABI version, currently `1` |
 
-- 模块**没有任何 import**，只导出 `memory` 与上述函数；不需要 wasm-bindgen。
-- 输入缓冲末尾必须是 NUL（`index.mjs` 自动处理）；返回串用
-  `rwkv_pf_free_string` 释放。
-- 体积 202,998 bytes，sha256 `c0fe38e101b40986b4c99cf345b07f30ed50df24d9d0cb5bc033724b21ffbed6`；
-  `wasm-release` profile 使用 `opt-level="z"` + LTO + `panic="abort"` + strip。
+- The module has **no imports**; it exports `memory` and the functions above. No
+  wasm-bindgen required.
+- The input buffer must end with NUL (`index.mjs` handles this); returned strings are
+  freed with `rwkv_pf_free_string`.
+- Size is 202,998 bytes, sha256
+  `c0fe38e101b40986b4c99cf345b07f30ed50df24d9d0cb5bc033724b21ffbed6`. The
+  `wasm-release` profile uses `opt-level="z"` + LTO + `panic="abort"` + strip.
 
-Node：
+Node:
 
 ```js
 import { check, fix, fixText, FIX_ALL } from './wasm/index.mjs';
@@ -272,7 +333,7 @@ const fixed  = await fix(text, FIX_ALL);
 const text2  = await fixText(text, FIX_ALL);
 ```
 
-Node 自动加载同目录的 `.wasm`。浏览器/Edge：
+Node loads the adjacent `.wasm` automatically. Browser/edge:
 
 ```js
 import { init, check } from './wasm/index.mjs';
@@ -280,143 +341,153 @@ await init(new URL('./rwkv_prompt_format.wasm', import.meta.url));
 const report = await check(text);
 ```
 
-`init(source)` 接受 URL/路径字符串、`Response`、`ArrayBuffer`、TypedArray 或
-`WebAssembly.Module`。flags：`FIX_SAFE=1`、`FIX_STRUCTURAL=2`、
-`FIX_STRIP_METADATA=4`、`FIX_ALL=3`。CLI：
+`init(source)` accepts a URL/path string, `Response`, `ArrayBuffer`, TypedArray, or
+`WebAssembly.Module`. Flags: `FIX_SAFE=1`, `FIX_STRUCTURAL=2`,
+`FIX_STRIP_METADATA=4`, `FIX_ALL=3`. CLI:
 
 ```bash
 node wasm/cli.mjs check --stdin --json < prompt.txt
 node wasm/cli.mjs fix --stdin < prompt.txt
 ```
 
-与 Rust CLI 的 `check` / `fix --json` 输出**逐字段一致**（30 组输入 × 4 档参数），
-退出码也一致。浏览器加载路径按标准 API 实现，但本机没有真实浏览器环境，只在
-Node 22 中验证了 bytes / ArrayBuffer / Response / URL / Module 五种 `init` 入口。
+Its `check` / `fix --json` output is **field-for-field identical** to the Rust CLI
+(30 inputs × 4 flag combinations), including exit codes. The browser path uses standard
+APIs but has not been run in a real browser; Node 22 was used to test five `init`
+sources: bytes, ArrayBuffer, Response, URL, and Module.
 
 ## MCP server
 
-`mcp/server.mjs` 是零依赖 stdio MCP server（Node ≥ 18），把同一份 WASM 暴露成
-三个工具：
+`mcp/server.mjs` is a zero-dependency stdio MCP server (Node ≥ 18) that exposes the same
+WASM as three tools:
 
-| 工具 | 参数 | 作用 |
+| Tool | Arguments | Result |
 |---|---|---|
-| `check_prompt_format` | `{ text }` | 返回 `FormatReport` |
-| `fix_prompt_format` | `{ text, mode?: "safe"/"structural"/"both", strip_metadata?: boolean }` | 返回 `FixResult`（含 `text`） |
-| `get_prompt_format_rules` | `{}` | 返回压缩版官方规则 |
+| `check_prompt_format` | `{ text }` | `FormatReport` |
+| `fix_prompt_format` | `{ text, mode?: "safe"/"structural"/"both", strip_metadata?: boolean }` | `FixResult` (including `text`) |
+| `get_prompt_format_rules` | `{}` | Condensed official rules |
 
-资源：`rwkv-prompt-format://rules`（`text/markdown`）。工具结果同时给
-`content[].text`（人类可读 JSON）与 `structuredContent`（机器可读）；参数错误
-返回 `isError: true`，未知工具返回 JSON-RPC `-32602`。每个工具都带 `title`、
-`annotations`（check/rules 只读、fix 幂等且非破坏）与 `outputSchema`，
-`initialize` 还会返回一段 `instructions`，便于客户端直接提示 agent 走
-check → fix → 复核流程。
+Resource: `rwkv-prompt-format://rules` (`text/markdown`). Tool results include both
+`content[].text` (human-readable JSON) and `structuredContent` (machine-readable).
+Invalid arguments return `isError: true`; an unknown tool returns JSON-RPC `-32602`.
+Every tool carries `title`, `annotations` (check/rules are read-only, fix is idempotent
+and non-destructive), and `outputSchema`; `initialize` also returns `instructions` so
+clients can steer agents through check → fix → verify.
 
-配置（安装器会自动写这一段）：
+Configuration (the installer writes this for you):
 
 ```json
 {
   "mcpServers": {
     "rwkv-prompt-format": {
       "command": "node",
-      "args": ["C:/work/ai00-x-dev/rwkv-prompt-format/mcp/server.mjs"]
+      "args": ["/path/to/rwkv-prompt-format/mcp/server.mjs"]
     }
   }
 }
 ```
 
-- 传输是 **newline-delimited JSON-RPC 2.0**（MCP stdio 规范），不是
-  `Content-Length` 帧；stdout 只走协议，日志全部走 stderr。
-- 支持协议版本 `2024-11-05` / `2025-03-26` / `2025-06-18`，未知版本回落
-  `2025-06-18`；输入上限 8 MiB。
-- 纯文本、无网络、不读用户文件；可并发，不保存会话状态。
+- Transport is **newline-delimited JSON-RPC 2.0** (MCP stdio), not `Content-Length`
+  framing; stdout is protocol-only and all logs go to stderr.
+- Supported protocol versions: `2024-11-05` / `2025-03-26` / `2025-06-18`; unknown
+  versions fall back to `2025-06-18`. Input limit: 8 MiB.
+- Pure text, no network, no file access; stateless and safe to call concurrently.
 
-## Skill 与一句话安装
+## Agent skill and one-prompt install
 
-`skills/rwkv-prompt-format/` 是给 AI agent 的 skill：`SKILL.md` 说明何时检查、
-check → fix → verify 的工作流、硬规则和禁止事项；`references/rules.md` 是完整规则
-与 finding code 参考。skill 附带的 `wasm/cli.mjs` 可在 MCP 不可用时兜底。
+`skills/rwkv-prompt-format/` is an AI-agent skill: `SKILL.md` explains when to check,
+the check → fix → verify workflow, hard rules, and things not to do;
+`references/rules.md` contains the full rules and finding codes. The bundled
+`wasm/cli.mjs` is a fallback when MCP tools are unavailable.
 
-安装器 `scripts/install-agent.mjs` 做两件事：
+`scripts/install-agent.mjs` does two things:
 
-1. 把 skill、MCP server、WASM 复制成自包含目录（不依赖本仓路径）；
-2. 在 Qoder 配置里合并 `mcpServers["rwkv-prompt-format"]`（保留其它键，
-   写前备份，原子替换；配置 JSON 损坏时**不写任何文件**）。
+1. copies the skill, MCP server, and WASM into a self-contained directory (no dependency
+   on this repository's path);
+2. merges `mcpServers["rwkv-prompt-format"]` into the Qoder config (preserves other keys,
+   backs up before writing, writes atomically; if the settings JSON is broken, it
+   **writes nothing**).
 
-| scope | skill 安装到 | MCP 配置写到 |
+| Scope | Skill installs to | MCP config |
 |---|---|---|
-| `user`（默认） | `~/.qoder-cn/skills/rwkv-prompt-format/` | `~/.qoder-cn/settings.json` |
+| `user` (default) | `~/.qoder-cn/skills/rwkv-prompt-format/` | `~/.qoder-cn/settings.json` |
 | `project` | `<project>/.qoder/skills/rwkv-prompt-format/` | `<project>/.qoder/settings.json` |
 | `local` | `<project>/.qoder/skills/rwkv-prompt-format/` | `<project>/.qoder/settings.local.json` |
 
-一句话安装（把这段发给 Qoder/任意 agent）：
+One-prompt install (paste this into Qoder or any agent):
 
-> 运行 `node C:\work\ai00-x-dev\rwkv-prompt-format\scripts\install-agent.mjs --scope user --yes`，
-> 然后提醒我执行 `/mcp reload` 和 `/skills reload`；之后处理 RWKV 提示词时先用
-> `check_prompt_format` 检查，必要时用 `fix_prompt_format`（`mode="both"`）修复并确认
-> `after.ok`。
+> Run `node <path-to>/rwkv-prompt-format/scripts/install-agent.mjs --scope user --yes`,
+> then remind me to run `/mcp reload` and `/skills reload`. When I work on an RWKV
+> prompt, first call `check_prompt_format`, and if needed call `fix_prompt_format` with
+> `mode="both"` and confirm `after.ok`.
 
-或者自己跑：
+Or run it yourself:
 
 ```bash
 node scripts/install-agent.mjs --scope user --yes
-node scripts/install-agent.mjs --scope user --dry-run          # 只看计划
-node scripts/install-agent.mjs --scope user --uninstall --yes   # 卸载
+node scripts/install-agent.mjs --scope user --dry-run          # print the plan only
+node scripts/install-agent.mjs --scope user --uninstall --yes   # uninstall
 ```
 
-安装后必须重载：`/mcp reload`（MCP）与 `/skills reload`（或重启会话）。
-卸载只删安装器自己写入的 MCP 条目和 skill 目录；同名但指向别处的条目会保留并以
-退出码 1 提示。
+Reload after installing: `/mcp reload` (MCP) and `/skills reload` (or restart the
+session). Uninstall removes only the MCP entry and skill directory that this installer
+created; a same-named entry pointing elsewhere is kept and reported with exit code 1.
 
-## 能力边界
+## Limitations
 
-- 只检查**格式**，不判断回答对错；也不加载模型做 perplexity。
-- 只支持 G1/G1x 官方模板。ChatML/Llama 3/JSONL/Markdown 是**输入**格式，会被转成
-  G1；其它模板（Llama 2、Mistral、私有 chat template）不猜，也不会把行内出现的
-  `<|im_start|>` 当作结构标记。
-- 规则码是稳定 API；`message` / `evidence` 文案可能改进，不建议用于断言。
-- 修复后仍可能残留 error（例如 `Assistant:` 开头、混合 instruction/chat），
-  报告会逐条列出，`notes` 会说明为何不自动处理。
-- CLI 每次启动约数毫秒；批量场景用 C ABI/ctypes/koffi/WASM，不要循环起进程。
-- WASM 是纯 `wasm32-unknown-unknown` 模块，不依赖 WASI，不能读写文件或网络；
-  调用方负责加载/传参。浏览器加载路径未在真实浏览器中跑过；如需更小体积可再
-  接 `wasm-opt`（本机未安装）。
-- MCP 只有 stdio 传输（没有 HTTP/SSE），需要 Node ≥ 18；工具输入上限 8 MiB。
-- C ABI/WASM 的输入以 NUL 结尾，因此文本不能含 `\0`；WASM 封装与 MCP 会显式
-  拒绝并报错，不会静默截断。
-- 安装器目前只写 Qoder 的 `settings.json` / `settings.local.json` 与 skill 目录；
-  Claude Desktop/Cursor 等其它客户端需要手动复制 MCP 配置。安装后必须
-  `/mcp reload` 与 `/skills reload`（或重启会话）才生效。
+- It checks **format only**. It does not judge answer quality and does not load a model
+  for perplexity.
+- Only the official G1/G1x templates are supported. ChatML/Llama 3/JSONL/Markdown are
+  **input** formats and are converted to G1; other templates (Llama 2, Mistral, private
+  chat templates) are not guessed, and an inline `<|im_start|>` is never treated as a
+  structural marker.
+- Rule codes are a stable API; `message` / `evidence` text may improve and should not be
+  used for assertions. Human-readable output is currently in Chinese.
+- Errors may remain after fixing (for example a prompt starting with `Assistant:` or a
+  mix of instruction and chat); the report lists them and `notes` explains why they were
+  not handled automatically.
+- CLI startup takes a few milliseconds; for batch workloads use the C ABI, ctypes,
+  koffi, or WASM instead of spawning a process per item.
+- The WASM module is plain `wasm32-unknown-unknown`, no WASI, with no file or network
+  access; the caller loads it and passes text. The browser path has not been tested in a
+  real browser. `wasm-opt` could shrink it further but is not installed here.
+- MCP supports stdio only (no HTTP/SSE) and needs Node ≥ 18; tool input is capped at
+  8 MiB.
+- C ABI/WASM inputs are NUL-terminated, so text cannot contain `\0`; the WASM wrapper and
+  MCP server reject it explicitly instead of truncating.
+- The installer only writes Qoder's `settings.json` / `settings.local.json` and skill
+  directory. Claude Desktop, Cursor, and other clients need the MCP config copied
+  manually. Reload with `/mcp reload` and `/skills reload` (or restart) after installing.
 
-## 测试
+## Testing
 
-按工作区规则，一次性验证脚本放在 `test/` 且验证完成后删除。2026-10-21 的完整
-验证基线：
+The full validation baseline from 2026-10-21 (temporary test suites, removed after
+validation):
 
-| 套件 | 规模 | 覆盖 |
+| Suite | Size | Coverage |
 |---|---|---|
-| `check` 矩阵 | 73 例 | 每种 format 的 finding code/severity/line、生成点、stats 交叉校验、确定性 |
-| `fix` 精确输出 | 34 例 | safe / structural / metadata 三档的逐字输出、外部模板转换 |
-| `fix` 模式不变量 | 44 例 | 三档参数下 `changed/after/ok/applied/notes` 一致性、幂等 |
-| 确定性模糊 | 6000 例 | 四档参数各 1500 例随机标签/冒号/空白/围栏/外部模板；`fix(fix(x)) == fix(x)`、`after == check(text)`、残错必有 notes、输出无 CR/BOM |
-| CLI | 27 项 | 退出码 0/1/2、三种输入源、`--json`、`--quiet`、`--in-place`、非法 UTF-8、Unicode 与 1 MB 往返 |
-| C ABI | 1 套 | FFI 与 CLI 的 JSON 逐字段一致、8 线程并发、3000 次调用内存稳定、NULL/非法 UTF-8、静态版本指针、1 MB 输入 |
-| 语言封装 | 3 套 | Python、Node(koffi)、Go 的 check/fix/幂等/Unicode/大输入 parity |
-| WASM（含封装） | 304 项 | 30 组输入 × 4 档参数与 Rust CLI 的 check/fix JSON 逐字段一致、退出码一致、幂等；五种 `init` 入口；1 MB；100 并发；5000 次 alloc/free 内存稳定；无 import |
-| MCP | 27 项 | initialize/协议版本、tools/list、三个工具、resources、错误码、结构化结果、notification 不回包、batch 拒绝、stdout 无噪声、9 KB 输入 |
-| Skill 安装器 | 48 项 | user/project/local 三 scope、配置合并保留其它键、幂等重跑、坏 JSON 不落盘、卸载所有权、安装后 MCP 实跑 |
+| `check` matrix | 73 cases | finding code/severity/line for each format, generation point, stats cross-checks, determinism |
+| `fix` exact output | 34 cases | byte-exact output for safe / structural / metadata modes, foreign template conversion |
+| `fix` mode invariants | 44 cases | `changed/after/ok/applied/notes` consistency across three flag sets, idempotency |
+| Deterministic fuzzing | 6000 cases | 1500 random label/colon/whitespace/fence/foreign-template inputs per flag set; `fix(fix(x)) == fix(x)`, `after == check(text)`, residual errors always have notes, no CR/BOM in output |
+| CLI | 27 checks | exit codes 0/1/2, three input sources, `--json`, `--quiet`, `--in-place`, invalid UTF-8, Unicode and 1 MB round-trips |
+| C ABI | 1 suite | JSON identical to the CLI, 8-thread concurrency, 3000 calls without memory growth, NULL/invalid UTF-8, static version pointer, 1 MB input |
+| Bindings | 3 suites | Python, Node (koffi), and Go parity for check/fix/idempotency/Unicode/large inputs |
+| WASM (incl. wrapper) | 304 checks | 30 inputs × 4 flag sets field-for-field identical to the Rust CLI, matching exit codes, idempotency; five `init` sources; 1 MB; 100 concurrent calls; 5000 alloc/free cycles without growth; no imports |
+| MCP | 27 checks | initialize/protocol versions, tools/list, all three tools, resources, error codes, structured results, no replies to notifications, batch rejection, clean stdout, 9 KB input |
+| Skill installer | 48 checks | user/project/local scopes, settings merge preserving other keys, idempotent re-run, broken JSON writes nothing, uninstall ownership, installed MCP server actually runs |
 
-以上一次性验证合计 **379 项，全部 0 失败**。Java/C# 封装因本机无 JDK/.NET 未运行
-验证；浏览器 WASM 未在真实浏览器中运行。
+The one-off validation totals **379 checks, 0 failures**. Java/C# bindings were not run
+(no JDK/.NET available); the browser WASM path was not run in a real browser.
 
-其中可重复执行的关键路径已固化为常驻门禁 `scripts/verify.mjs`（当前 **74 项**，
-`--quick` 为 34 项），不依赖临时文件，也不写仓库：
+The repeatable critical paths are checked in as `scripts/verify.mjs` (**74 checks**,
+34 with `--quick`). It uses no temporary files and writes nothing to the repository:
 
-| 套件 | 覆盖 |
+| Suite | Coverage |
 |---|---|
-| Rust ↔ WASM parity | 15 组语料（chat/messy/ChatML/Llama 3/JSONL/Markdown/材料问答/think/围栏/BOM+CRLF/续写/元数据/空文本/纯文本/64 KB Unicode）× check 与 safe/structural/both 三档 fix；`changed`/`after == check(text)`/残错必有 notes/幂等 |
-| MCP | initialize/instructions、tools/list（title/annotations/outputSchema）、check/fix、resources、未知方法/工具、非法 mode、NUL 拒绝、notification 不回包、ping |
-| 安装器 | user scope 安装、配置合并保留无关键、幂等重跑、安装后 MCP server 实跑、坏 JSON 不落盘、非自有条目不删、卸载清理 |
-| 元数据 | `--strip-metadata` 两栈逐字段一致 |
+| Rust ↔ WASM parity | 15 corpus inputs (chat/messy/ChatML/Llama 3/JSONL/Markdown/material QA/think/fence/BOM+CRLF/continuation/metadata/empty/plain/64 KB Unicode) × check and safe/structural/both fix; `changed`, `after == check(text)`, residual errors have notes, idempotency |
+| MCP | initialize/instructions, tools/list (title/annotations/outputSchema), check/fix, resources, unknown method/tool, invalid mode, NUL rejection, no reply to notifications, ping |
+| Installer | user-scope install, merge preserving unrelated keys, idempotent re-run, installed MCP server actually runs, broken JSON writes nothing, foreign entry preserved, uninstall cleanup |
+| Metadata | `--strip-metadata` parity between the Rust and WASM stacks |
 
 ```bash
 cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings
@@ -427,9 +498,16 @@ printf 'User: hi\n\n\nAssistant:' | ./target/release/rwkv-pf fix --stdin
 node wasm/cli.mjs check --text "User: hi" --json
 ```
 
-`verify.mjs` 需要 `target/release/rwkv-pf` 和已提交的 WASM；CI 把上述命令按序
-串起来即可。仓库当前没有远端，因此未附 CI 配置文件。
+`verify.mjs` needs `target/release/rwkv-pf` and the committed WASM. A CI job can run
+these commands in order; no workflow file is included yet.
+
+## Contributing
+
+Issues and pull requests are welcome. Before opening a PR, run `cargo fmt --all`,
+`cargo clippy --all-targets -- -D warnings`, `node scripts/build-wasm.mjs --check`, and
+`node scripts/verify.mjs`. Rule codes are a public API — do not rename them casually.
 
 ## License
 
-MIT OR Apache-2.0
+Dual-licensed under **MIT OR Apache-2.0**. See [LICENSE-MIT](LICENSE-MIT) and
+[LICENSE-APACHE](LICENSE-APACHE).

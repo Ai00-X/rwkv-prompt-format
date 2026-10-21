@@ -114,13 +114,17 @@ def fix_text(text: str, flags: int = FIX_ALL) -> Optional[str]:
 
 
 if __name__ == "__main__":
-    source = sys.stdin.read()
+    source = sys.stdin.buffer.read().decode("utf-8")
     result = fix(source)
-    sys.stdout.write(result.get("text", ""))
     summary = {
         "changed": result.get("changed"),
         "applied": result.get("applied"),
         "notes": result.get("notes"),
         "error_count": result.get("after", {}).get("error_count"),
     }
-    print(json.dumps(summary, ensure_ascii=False), file=sys.stderr)
+    # 管道/重定向时 stdout/stderr 会用本地编码（Windows 上是 cp936），
+    # 中文与 emoji 会乱码或抛 UnicodeEncodeError。CLI 契约固定 UTF-8。
+    sys.stdout.buffer.write(result.get("text", "").encode("utf-8"))
+    sys.stdout.buffer.flush()
+    sys.stderr.buffer.write((json.dumps(summary, ensure_ascii=False) + "\n").encode("utf-8"))
+    sys.stderr.buffer.flush()

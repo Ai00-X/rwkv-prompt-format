@@ -406,16 +406,12 @@ fn check_tools_label(
 fn markdown_role(line: &str) -> Option<&'static str> {
     let t = line.trim_start();
     // 必须先有 Markdown 标记；否则裸的 `User:` 是官方 plain 格式，不是 Markdown。
-    if !(t.starts_with('#')
-        || t.starts_with("**")
-        || t.starts_with('*')
-        || t.starts_with("> ")
-        || t.starts_with("- "))
-    {
+    // `- User:` 不算角色头：列表项在 prompt 里很常见，误报会逼用户改正文。
+    if !(t.starts_with('#') || t.starts_with("**") || t.starts_with('*') || t.starts_with("> ")) {
         return None;
     }
     let t = t.trim_start_matches('#').trim_start();
-    let t = t.trim_start_matches(['*', '-', '>', ' ']);
+    let t = t.trim_start_matches(['*', '>', ' ']);
     for (name, _) in KNOWN {
         let Some(rest) = t.strip_prefix(name) else {
             continue;
@@ -432,7 +428,7 @@ fn jsonl_role(line: &str) -> bool {
     t.starts_with("{\"role\"") && t.contains("\"content\"")
 }
 
-fn continuation_label(line: &str) -> Option<(&str, &str)> {
+pub(crate) fn continuation_label(line: &str) -> Option<(&str, &str)> {
     const LABELS: [&str; 12] = [
         "English",
         "Chinese",
@@ -457,6 +453,85 @@ fn continuation_label(line: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((head, tail))
+}
+
+/// 末尾的续写标签：`English:` / `English: A principios`。
+///
+/// 只认「整段文本的第一行」或「一个空行之后」的标签——否则 Assistant 正文里
+/// 恰好以 `English:` 开头的一行会被误当生成点。返回 `(0-based 行号, 规范写法, seed)`。
+pub(crate) fn continuation_tail<'a>(
+    lines: &[&'a str],
+    in_fence: &[bool],
+) -> Option<(usize, &'static str, &'a str)> {
+    let (idx, raw) = lines
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, raw)| !strip_cr(raw).trim().is_empty())?;
+    if in_fence[idx] {
+        return None;
+    }
+    let first_or_after_blank = lines[..idx]
+        .iter()
+        .all(|line| strip_cr(line).trim().is_empty())
+        || strip_cr(lines[idx - 1]).trim().is_empty();
+    if !first_or_after_blank {
+        return None;
+    }
+    let (head, tail) = continuation_label(raw)?;
+    let canonical = [
+        "English",
+        "Chinese",
+        "Japanese",
+        "Korean",
+        "French",
+        "German",
+        "Spanish",
+        "Russian",
+        "Portuguese",
+        "Italian",
+        "Arabic",
+        "Hindi",
+    ]
+    .into_iter()
+    .find(|label| label.eq_ignore_ascii_case(head))?;
+    Some((idx, canonical, tail))
+}
+
+fn fence_scan(lines: &[&str]) -> (Vec<bool>, Option<usize>) {
+    let mut in_fence = vec![false; lines.len()];
+    let mut fence = false;
+    let mut opened_at = None;
+    for (i, raw) in lines.iter().enumerate() {
+        let line = strip_cr(raw);
+        let fence_line = line.trim_start().starts_with("```");
+        // 官方模板允许围栏直接跟在标签后：`Assistant: ```json`。
+        // 这种标签行本身仍是块边界，但会开启围栏。
+        let label_fence = !fence
+            && parse_label(line).is_some_and(|(_, rest)| rest.trim_start().starts_with("```"));
+        if fence_line {
+            in_fence[i] = true;
+            fence = !fence;
+            opened_at = fence.then_some(i);
+        } else if label_fence {
+            in_fence[i] = false;
+            fence = true;
+            opened_at = Some(i);
+        } else {
+            in_fence[i] = fence;
+        }
+    }
+    (in_fence, opened_at)
+}
+
+/// 标记每一行是否位于 Markdown 代码围栏内。
+pub(crate) fn fence_flags(lines: &[&str]) -> Vec<bool> {
+    fence_scan(lines).0
+}
+
+/// 最后一处没有闭合的围栏起始行（0-based）。
+pub(crate) fn unclosed_fence(lines: &[&str]) -> Option<usize> {
+    fence_scan(lines).1
 }
 
 fn foreign_markers() -> &'static [(&'static str, &'static str)] {
@@ -757,32 +832,54 @@ pub fn check(text: &str) -> FormatReport {
         }
     }
 
-    // ---- 代码围栏：围栏内的 `User:` 是内容，不是块边界 ----
-    let mut in_fence = vec![false; lines.len()];
-    let mut fence = false;
-    for (i, raw) in lines.iter().enumerate() {
-        let line = strip_cr(raw);
-        let fence_line = line.trim_start().starts_with("```");
-        // 官方模板允许围栏直接跟在标签后：`Assistant: ```json`。
-        // 这种标签行本身仍是块边界，但会开启围栏。
-        let label_fence = !fence
-            && parse_label(line).is_some_and(|(_, rest)| rest.trim_start().starts_with("```"));
-        if fence_line {
-            in_fence[i] = true;
-            fence = !fence;
-        } else if label_fence {
-            in_fence[i] = false;
-            fence = true;
-        } else {
-            in_fence[i] = fence;
+    // 整份文档的 JSON（数组或 `{"messages":[…]}`）也是外部模板；逐行扫描
+    // 只认 `{"role"` 开头的紧凑 JSONL，覆盖不了这两种常见写法。
+    if !jsonl && let Ok(value) = serde_json::from_str::<serde_json::Value>(text.trim()) {
+        let looks_like_messages = value
+            .as_array()
+            .is_some_and(|items| items.iter().any(|v| v.get("role").is_some()))
+            || value
+                .get("messages")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|items| items.iter().any(|v| v.get("role").is_some()));
+        if looks_like_messages {
+            jsonl = true;
+            push(
+                "JSONL_ROLE",
+                Severity::Error,
+                1,
+                "整份 JSON 消息数组是 OpenAI/JSONL 模板，不是 RWKV 训练格式".to_string(),
+                evidence(lines[0]),
+            );
         }
     }
+
+    // ---- 代码围栏：围栏内的 `User:` 是内容，不是块边界 ----
+    let in_fence = fence_flags(&lines);
+    if let Some(idx) = unclosed_fence(&lines) {
+        push(
+            "UNCLOSED_CODE_FENCE",
+            Severity::Error,
+            idx + 1,
+            "代码围栏没有闭合；后面的角色标签会被当成围栏内容，模型看到的结构会变".to_string(),
+            evidence(lines[idx]),
+        );
+    }
+
+    // 续写标签是独立生成点，不能当成上一块正文。外语模板里出现的 `English:`
+    // 不算（那些格式整体就不合法，由各自的 finding 处理）。
+    let continuation = if chatml || jsonl || markdown {
+        None
+    } else {
+        continuation_tail(&lines, &in_fence)
+    };
+    let parse_end = continuation.map_or(lines.len(), |(idx, _, _)| idx);
 
     // ---- 块解析 ----
     let mut blocks: Vec<Block> = Vec::new();
     let mut current: Option<Block> = None;
     let mut preamble: Vec<usize> = Vec::new();
-    for (i, raw) in lines.iter().enumerate() {
+    for (i, raw) in lines.iter().enumerate().take(parse_end) {
         let line = strip_cr(raw);
 
         if let Some((bad, name)) = malformed_label(line) {
@@ -847,6 +944,18 @@ pub fn check(text: &str) -> FormatReport {
     if let Some(block) = current.take() {
         blocks.push(block);
     }
+    if continuation.is_some()
+        && let Some(last) = blocks.last_mut()
+    {
+        // 续写标签前的空行是块分隔，不是上一块的正文空行。
+        while last
+            .body
+            .last()
+            .is_some_and(|&i| strip_cr(lines[i]).trim().is_empty())
+        {
+            last.body.pop();
+        }
+    }
 
     // ---- 统计与 kind ----
     for block in &blocks {
@@ -885,20 +994,6 @@ pub fn check(text: &str) -> FormatReport {
     let has_input = blocks.iter().any(|b| b.label == Label::Input);
     let has_response = blocks.iter().any(|b| b.label == Label::Response);
 
-    let continuation = lines
-        .iter()
-        .enumerate()
-        .rev()
-        .find_map(|(i, raw)| {
-            let line = strip_cr(raw);
-            if line.trim().is_empty() {
-                None
-            } else {
-                Some((i + 1, continuation_label(line)))
-            }
-        })
-        .and_then(|(line, label)| label.map(|(head, tail)| (line, head, tail)));
-
     let kind = if chatml {
         Kind::Chatml
     } else if jsonl {
@@ -911,6 +1006,10 @@ pub fn check(text: &str) -> FormatReport {
         Kind::Instruction
     } else if has_instr && (has_user || has_assistant) {
         Kind::InstructionChat
+    } else if continuation.is_some() {
+        // 对话 + 末尾 `English:` 也是续写格式；不能因为前面有 User/Assistant
+        // 就归成 plain_chat，否则 format 字段丢掉了真正的生成点类型。
+        Kind::Continuation
     } else if has_user || has_assistant {
         if text.contains("材料：") || text.contains("问题：") || text.contains("{\"answer\"")
         {
@@ -918,8 +1017,6 @@ pub fn check(text: &str) -> FormatReport {
         } else {
             Kind::PlainChat
         }
-    } else if continuation.is_some() {
-        Kind::Continuation
     } else {
         Kind::Unknown
     };
@@ -1026,6 +1123,44 @@ pub fn check(text: &str) -> FormatReport {
                     ),
                     evidence(lines[i]),
                 );
+            }
+        }
+
+        // 续写标签与上一块之间同样是块分隔，必须恰好一个空行。
+        if let Some((idx, head, _)) = continuation
+            && let Some(last) = blocks.last()
+        {
+            let content_end = last
+                .body
+                .iter()
+                .rposition(|&i| !strip_cr(lines[i]).trim().is_empty())
+                .unwrap_or(last.line - 1);
+            let blanks = idx.saturating_sub(content_end + 1);
+            if blanks == 0 {
+                push(
+                    "MISSING_BLANK_SEPARATOR",
+                    Severity::Error,
+                    idx + 1,
+                    format!(
+                        "`{}` 与续写标签 `{head}:` 之间不能只隔一个 `\\n`；官方用一个空行分隔",
+                        label_name(last.label)
+                    ),
+                    format!(
+                        "{} ⏎ {}",
+                        evidence(lines[content_end]),
+                        evidence(lines[idx])
+                    ),
+                );
+            } else if blanks > 1 {
+                push(
+                    "EXTRA_BLANK_SEPARATOR",
+                    Severity::Error,
+                    idx + 1,
+                    format!("块与续写标签之间只能有一个空行；这里空了 {blanks} 行"),
+                    evidence(lines[idx]),
+                );
+            } else {
+                stats.blank_separators += 1;
             }
         }
 
@@ -1404,15 +1539,21 @@ pub fn check(text: &str) -> FormatReport {
     }
 
     // ---- 生成点 ----
-    // 历史轮次里的 think 前缀同样校验（最后一块在生成点分支里处理）。
+    // 有续写标签时，最后一块（Assistant）只是历史回答，不能当生成点。
+    let generation_block = if continuation.is_some() {
+        None
+    } else {
+        blocks.last()
+    };
+    // 历史轮次里的 think 前缀同样校验（生成块在生成点分支里处理）。
     for b in &blocks {
-        if b.label == Label::Assistant && blocks.last().is_none_or(|last| last.line != b.line) {
+        if b.label == Label::Assistant && generation_block.is_none_or(|last| last.line != b.line) {
             let _ = check_think_prefix(&lines, b, &mut push, false);
         }
     }
 
     let mut generation_point: Option<GenerationPoint> = None;
-    if let Some(last) = blocks.last() {
+    if let Some(last) = generation_block {
         match last.label {
             Label::Assistant | Label::Response => {
                 let seeded = has_content(&lines, last);
@@ -1542,20 +1683,20 @@ pub fn check(text: &str) -> FormatReport {
     }
 
     // ---- 续写格式的生成点 ----
-    if kind == Kind::Continuation
-        && let Some((line, head, tail)) = continuation
+    if !kind.foreign()
+        && let Some((idx, head, tail)) = continuation
     {
         generation_point = Some(GenerationPoint {
-            line,
+            line: idx + 1,
             role: head.to_ascii_lowercase(),
             seeded: !tail.trim().is_empty(),
         });
         push(
             "CONTINUATION_LABEL",
             Severity::Info,
-            line,
+            idx + 1,
             format!("续写格式：以 `{head}:` 结尾，符合官方示例"),
-            evidence(lines[line - 1]),
+            evidence(lines[idx]),
         );
     }
 

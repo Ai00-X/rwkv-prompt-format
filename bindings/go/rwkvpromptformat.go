@@ -6,9 +6,9 @@
 // PATH (or set RWKV_PROMPT_FORMAT_CLI to its full path).
 //
 //	cd rwkv-prompt-format && cargo build --release
-//	export RWKV_PROMPT_FORMAT_CLI=$PWD/target/release/rwkv-prompt-format
+//	export RWKV_PROMPT_FORMAT_CLI=$PWD/target/release/rwkv-pf
 //
-// Every call spawns the CLI (about a millisecond of overhead); for hot loops
+// Every call spawns the CLI (a few milliseconds of overhead); for hot loops
 // use the C ABI directly.
 package rwkvpf
 

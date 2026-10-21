@@ -15,7 +15,9 @@
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::check::{KNOWN, Label, check, label_name, parse_label, strip_cr};
+use crate::check::{
+    KNOWN, Label, check, continuation_tail, fence_flags, label_name, parse_label, strip_cr,
+};
 use crate::types::{FormatReport, Severity};
 
 /// 安全修复：只动语法与空白，不增删块。
@@ -107,6 +109,12 @@ pub fn fix(text: &str, options: &FixOptions) -> FixResult {
     };
 
     let after = check(&fixed);
+    if after.error_count > 0 && notes.is_empty() {
+        notes.push(format!(
+            "修复后仍有 {} 个 error，属内容或结构歧义，未自动处理（见 after.findings）",
+            after.error_count
+        ));
+    }
     let applied = diff_applied(&before, &after, fixed != text);
     FixResult {
         changed: fixed != text,
@@ -141,19 +149,57 @@ struct Parsed {
 
 fn rewrite(text: &str, options: &FixOptions, notes: &mut Vec<String>) -> String {
     // BOM / CRLF 是字节级问题，任何修复模式都先处理。
-    let work = text
-        .strip_prefix('\u{feff}')
-        .unwrap_or(text)
+    // BOM 可能被空白挡在行首（`" \u{feff}User:"`），一律删掉，不能只认第一个字符。
+    let normalized = text
+        .replace('\u{feff}', "")
         .replace("\r\n", "\n")
         .replace('\r', "\n");
-
-    if work.trim().is_empty() {
+    // 修复器只做规范化，不替调用方决定是否加文件末尾换行：原来有就保留，没有就不加。
+    let final_newline = normalized.ends_with('\n');
+    if normalized.trim().is_empty() {
         notes.push("输入为空，未做任何修改".to_string());
-        return work;
+        return normalized;
+    }
+    // 元数据前缀在**解析前**去掉，否则 `[seg 3 · user] User: hi` 整行都不是标签，
+    // 会被当成前言吞进 System。解析后的 strip_metadata 只兜底标签行内的前缀。
+    let work = if options.strip_metadata {
+        strip_seg_lines(&normalized)
+    } else {
+        normalized
+    };
+
+    // 续写标签（`English:` / `English: A`）是独立生成点，先切出来，
+    // 否则会被当成上一块正文，安全修复会顺手把块间空行折掉。
+    let (work, continuation) = if options.safe || options.structural {
+        split_continuation(&work)
+    } else {
+        (work, None)
+    };
+
+    if work.trim().is_empty() && continuation.is_none() {
+        notes.push("输入为空，未做任何修改".to_string());
+        // 元数据剥离可能把「只有元数据」的输入变成空串；直接返回空串，
+        // 否则空行数量每轮都会被 `lines()` 再收一次，收敛不了。
+        return String::new();
     }
 
     let mut parsed = if options.structural {
-        convert_foreign(&work, notes).unwrap_or_else(|| parse_blocks(&work, true, notes))
+        match convert_foreign(&work, notes) {
+            Some(mut converted) => {
+                // ChatML / Llama 3 的「第一个协议标记之前」可能仍是 G1 标签文本；
+                // 当成前言包进 System 会让下一轮解析出不同的块结构。
+                if !converted.preamble.trim().is_empty() {
+                    let mut pre = parse_blocks(&converted.preamble, true, notes);
+                    if !pre.msgs.is_empty() {
+                        pre.msgs.append(&mut converted.msgs);
+                        converted.msgs = pre.msgs;
+                        converted.preamble = pre.preamble;
+                    }
+                }
+                converted
+            }
+            None => parse_blocks(&work, true, notes),
+        }
     } else {
         parse_blocks(&work, false, notes)
     };
@@ -165,34 +211,89 @@ fn rewrite(text: &str, options: &FixOptions, notes: &mut Vec<String>) -> String 
 
     if options.strip_metadata {
         strip_metadata(&mut parsed.msgs);
+        // 外部模板转换可能把 `[seg …]` 结尾追加到前言，前言尚未成块，单独清一遍。
+        parsed.preamble = strip_seg_lines(&parsed.preamble);
     }
 
-    if options.structural {
+    let mut out = if options.structural {
         if !parsed.preamble.trim().is_empty() {
             let content = clean_text(&parsed.preamble);
             if !content.is_empty() {
-                // 完全无标签的裸文本更像一个问题 → User；已有标签时，前导正文是上下文 → System。
-                let label = if parsed.msgs.is_empty() {
-                    notes.push("没有角色标签：整段文本已包装为 `User:` 并补生成点".to_string());
-                    Label::User
+                if parsed.msgs.is_empty() && continuation.is_some() {
+                    // 纯续写：标签前的文本就是上下文，包装成 `User:` 会改变语义。
+                    parsed.preamble = content;
                 } else {
-                    notes.push("第一个角色标签之前的正文已并入 `System:`".to_string());
-                    Label::System
-                };
-                parsed.msgs.insert(
-                    0,
-                    Msg {
-                        label,
-                        content,
-                        inline: true,
-                    },
-                );
+                    // 完全无标签的裸文本更像一个问题 → User；已有标签时，前导正文是上下文 → System。
+                    let label = if parsed.msgs.is_empty() {
+                        notes.push("没有角色标签：整段文本已包装为 `User:` 并补生成点".to_string());
+                        Label::User
+                    } else {
+                        notes.push("第一个角色标签之前的正文已并入 `System:`".to_string());
+                        Label::System
+                    };
+                    parsed.msgs.insert(
+                        0,
+                        Msg {
+                            label,
+                            content,
+                            inline: true,
+                        },
+                    );
+                    parsed.preamble.clear();
+                    // 包装出来的块是新内容，还没跑过单块规范化（think hint / Tools / 行首缩进）。
+                    let only = parsed.msgs.len() == 1;
+                    normalize_msg(&mut parsed.msgs[0], only, notes);
+                }
             }
         }
-        transform(&mut parsed.msgs, notes);
-        render(&parsed.msgs, "")
+        transform(&mut parsed.msgs, notes, continuation.is_some());
+        render(&parsed.msgs, &parsed.preamble, true)
     } else {
-        render(&parsed.msgs, &parsed.preamble)
+        render(&parsed.msgs, &parsed.preamble, false)
+    };
+    if let Some(cont) = &continuation {
+        append_continuation(&mut out, cont);
+    }
+    if final_newline && !out.is_empty() {
+        out.push('\n');
+    }
+    out
+}
+
+#[derive(Debug, Clone)]
+struct Continuation {
+    /// 规范写法（`English` / `German`…）。
+    head: &'static str,
+    /// 冒号后的 seed 内容，已去掉两侧空白；空表示留空续写。
+    seed: String,
+}
+
+/// 把末尾续写标签从正文中切出来；标签前的空行由渲染统一补一个。
+fn split_continuation(text: &str) -> (String, Option<Continuation>) {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let flags = fence_flags(&lines);
+    let Some((idx, head, tail)) = continuation_tail(&lines, &flags) else {
+        return (text.to_string(), None);
+    };
+    let seed = tail.trim();
+    (
+        lines[..idx].join("\n").trim_end().to_string(),
+        Some(Continuation {
+            head,
+            seed: seed.to_string(),
+        }),
+    )
+}
+
+fn append_continuation(out: &mut String, cont: &Continuation) {
+    if !out.is_empty() {
+        out.push_str("\n\n");
+    }
+    out.push_str(cont.head);
+    out.push(':');
+    if !cont.seed.is_empty() {
+        out.push(' ');
+        out.push_str(&cont.seed);
     }
 }
 
@@ -208,34 +309,86 @@ fn must_inline(msg: &Msg) -> bool {
     }
 }
 
-fn render(msgs: &[Msg], preamble: &str) -> String {
+fn render(msgs: &[Msg], preamble: &str, structural: bool) -> String {
     let mut blocks: Vec<String> = Vec::new();
     if !preamble.trim().is_empty() {
         let p = clean_text(preamble);
         if !p.is_empty() {
-            blocks.push(p);
+            blocks.push(balance_fences(p));
         }
     }
     for msg in msgs {
-        let name = label_name(msg.label);
-        if msg.content.is_empty() {
-            blocks.push(format!("{name}:"));
-        } else if msg.inline || must_inline(msg) {
-            blocks.push(format!("{name}: {}", msg.content));
+        blocks.push(balance_fences(render_msg(msg, structural)));
+    }
+    blocks.join("\n\n")
+}
+
+/// 渲染时保证正文里不会出现新标签行：正文首行若长得像标签，就保持在标签同一行；
+/// 后续行若长得像标签，用空格接回上一行。角色标签只按行首识别，这样输出
+/// 重新解析时块边界不变（`fix` 的固定点性质依赖这一点）。
+fn render_msg(msg: &Msg, structural: bool) -> String {
+    let name = label_name(msg.label);
+    if msg.content.is_empty() {
+        return format!("{name}:");
+    }
+    let mut lines = msg.content.split('\n');
+    let first = lines.next().unwrap_or("");
+    let inline = msg.inline || must_inline(msg) || line_starts_role(first, structural);
+    let mut out = String::new();
+    out.push_str(name);
+    out.push(':');
+    if inline {
+        out.push(' ');
+    } else {
+        out.push('\n');
+    }
+    out.push_str(first);
+    let mut in_fence = first.trim_start().starts_with("```");
+    for line in lines {
+        let fence_line = line.trim_start().starts_with("```");
+        if !in_fence && !fence_line && line_starts_role(line, structural) {
+            out.push(' ');
         } else {
-            blocks.push(format!(
-                "{name}:
-{}",
-                msg.content
-            ));
+            out.push('\n');
+        }
+        out.push_str(line);
+        if fence_line {
+            in_fence = !in_fence;
         }
     }
-    if blocks.is_empty() {
-        return String::new();
-    }
-    let mut out = blocks.join("\n\n");
-    out.push('\n');
     out
+}
+
+/// 下一轮解析会把这行当成块边界/外部模板特征吗？是则渲染时不能让它落在行首。
+/// 注意 `## User` / `> User:` 这类 Markdown 头会触发结构模式的模板转换。
+fn line_starts_role(line: &str, structural: bool) -> bool {
+    split_label_any(line, structural).is_some()
+        || (structural && (markdown_header(line).is_some() || starts_foreign_marker(line)))
+}
+
+/// 行首的外部协议标记会触发整段模板转换；合并块后不能让它们落到行首。
+fn starts_foreign_marker(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("<|im_start|>")
+        || t.starts_with("<|start_header_id|>")
+        || t.starts_with("<|begin_of_text|>")
+}
+
+/// 块内围栏必须是偶数个，否则重新解析时会把后面的块吞进代码块。
+/// 一个未闭合的围栏补一行闭合；这是幂等的（补完就是偶数）。
+fn balance_fences(block: String) -> String {
+    let fences = block
+        .lines()
+        .filter(|line| {
+            line.trim_start().starts_with("```")
+                || parse_label(line).is_some_and(|(_, rest)| rest.trim_start().starts_with("```"))
+        })
+        .count();
+    if fences % 2 == 1 {
+        format!("{block}\n```")
+    } else {
+        block
+    }
 }
 
 /// 正文清洗：按行去掉空行（官方 `clean_txt` 的 `\n{2,}` → `\n`）。
@@ -367,8 +520,19 @@ fn loose_label<'a>(line: &'a str, name: &str) -> Option<&'a str> {
 // ---------------------------------------------------------------------------
 
 fn normalize_msg(msg: &mut Msg, is_last: bool, notes: &mut Vec<String>) {
-    let had_fence_blank =
-        msg.content.split('\n').any(|line| line.trim().is_empty()) && msg.content.contains("```");
+    let content_lines: Vec<&str> = msg.content.lines().collect();
+    let start = content_lines
+        .iter()
+        .position(|line| !line.trim().is_empty())
+        .unwrap_or(0);
+    let end = content_lines
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+        .map_or(0, |i| i + 1);
+    let had_fence_blank = msg.content.contains("```")
+        && content_lines[start..end]
+            .iter()
+            .any(|line| line.trim().is_empty());
 
     let mut lines: Vec<String> = msg
         .content
@@ -389,6 +553,15 @@ fn normalize_msg(msg: &mut Msg, is_last: bool, notes: &mut Vec<String>) {
         Label::Assistant => content = normalize_think_prefix(&content),
         Label::User => content = normalize_think_hints(&content),
         _ => {}
+    }
+
+    // think hint 被移到句末后，行首可能留下一个空格（`(think) solve` → ` solve`）。
+    // 内联块的首行不能带缩进，否则 `User:  solve` 要第二次修复才收敛。
+    if msg.inline {
+        content = match content.split_once('\n') {
+            Some((first, rest)) => format!("{}\n{rest}", first.trim_start()),
+            None => content.trim_start().to_string(),
+        };
     }
 
     if had_fence_blank && content.contains("```") {
@@ -484,7 +657,14 @@ fn normalize_think_hints(content: &str) -> String {
         }
         out_lines.push(cleaned);
     }
-    let mut out = out_lines.join("\n").trim_end().to_string();
+    // 移除 hint 后可能留下空白行；正文空行本来就在前面被过滤过，这里可以安全再过滤一次。
+    let mut out = out_lines
+        .into_iter()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_end()
+        .to_string();
     if let Some(hint) = hint {
         if !out.is_empty() {
             out.push(' ');
@@ -519,9 +699,14 @@ fn strip_hints_from_line(line: &str) -> (String, Option<&'static str>) {
                         out.pop();
                     }
                     i = j + 1;
-                    if let Some(&next) = chars.get(i)
+                    if out.trim().is_empty() {
+                        // hint 在行首：删除后残留的分隔空格也一起吃掉，否则会多出空行。
+                        out.clear();
+                        while chars.get(i).is_some_and(|c| c.is_whitespace()) {
+                            i += 1;
+                        }
+                    } else if let Some(&next) = chars.get(i)
                         && !next.is_whitespace()
-                        && !out.is_empty()
                         && !out.ends_with(char::is_whitespace)
                     {
                         out.push(' ');
@@ -572,6 +757,22 @@ fn strip_metadata(msgs: &mut [Msg]) {
     }
 }
 
+/// 解析前按行去掉 `[seg N · role]` 前缀；整行只有元数据时直接丢弃。
+fn strip_seg_lines(text: &str) -> String {
+    text.lines()
+        .filter_map(|line| {
+            let t = line.trim_start();
+            if let Some(rest) = strip_seg_prefix(t) {
+                let rest = rest.trim_start();
+                (!rest.is_empty()).then(|| rest.to_string())
+            } else {
+                Some(line.to_string())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn strip_seg_prefix(line: &str) -> Option<&str> {
     let rest = line.strip_prefix("[seg ")?;
     let close = rest.find(']')?;
@@ -583,13 +784,24 @@ fn strip_seg_prefix(line: &str) -> Option<&str> {
 // 结构变换
 // ---------------------------------------------------------------------------
 
-fn transform(msgs: &mut Vec<Msg>, notes: &mut Vec<String>) {
+fn transform(msgs: &mut Vec<Msg>, notes: &mut Vec<String>, has_continuation: bool) {
     drop_empty(msgs);
     merge_system(msgs, notes);
     merge_same_role(msgs);
     reorder_instruction(msgs);
-    ensure_generation_point(msgs);
-    audit_residual(msgs, notes);
+    // 重排会把两个同角色块变成相邻（Instruction/Instruction、Input/Input），
+    // 必须再合并一次，否则下一轮修复才收敛。
+    merge_same_role(msgs);
+    if !has_continuation {
+        ensure_generation_point(msgs);
+    }
+    // 合并/补生成点会改变「谁是最后一块」与正文边界，之前的归一化结果可能已失效；
+    // 再跑一遍单块规范化，保证 fix 的输出就是下一轮的固定点。
+    let last = msgs.len().saturating_sub(1);
+    for (idx, msg) in msgs.iter_mut().enumerate() {
+        normalize_msg(msg, idx == last, notes);
+    }
+    audit_residual(msgs, notes, has_continuation);
 }
 
 fn drop_empty(msgs: &mut Vec<Msg>) {
@@ -732,7 +944,7 @@ fn ensure_generation_point(msgs: &mut Vec<Msg>) {
     });
 }
 
-fn audit_residual(msgs: &[Msg], notes: &mut Vec<String>) {
+fn audit_residual(msgs: &[Msg], notes: &mut Vec<String>, has_continuation: bool) {
     if msgs.first().is_some_and(|m| m.label == Label::Assistant) {
         notes.push("开头是 `Assistant:`（无对应 `User:`）：删除会丢内容，未自动修复".to_string());
     }
@@ -755,6 +967,14 @@ fn audit_residual(msgs: &[Msg], notes: &mut Vec<String>) {
     {
         notes.push("`Input:/Response:` 缺少 `Instruction:`：未自动猜测指令内容".to_string());
     }
+    if !has_continuation
+        && let Some(pos) = msgs.iter().position(|m| m.label == Label::System)
+        && msgs
+            .get(pos + 1)
+            .is_some_and(|m| m.label == Label::Assistant)
+    {
+        notes.push("`System:` 后直接跟 `Assistant:`（缺 `User:`）：未自动补造用户问题".to_string());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -762,12 +982,15 @@ fn audit_residual(msgs: &[Msg], notes: &mut Vec<String>) {
 // ---------------------------------------------------------------------------
 
 fn convert_foreign(text: &str, notes: &mut Vec<String>) -> Option<Parsed> {
-    if text.contains("<|im_start|>") {
+    // 只有协议标记出现在行首（允许前面是别的协议标记）才按整段模板转换。
+    // `User: <|im_start|>user…` 这种「G1 标签里嵌了外部标记」是内容，
+    // 整段转换会把标签和正文顺序改掉。
+    if marker_at_line_start(text, "<|im_start|>") {
         let parsed = convert_chatml(text, notes);
         notes.push("已把 ChatML 模板转换为 G1 plain".to_string());
         return Some(parsed);
     }
-    if text.contains("<|start_header_id|>") {
+    if marker_at_line_start(text, "<|start_header_id|>") {
         let parsed = convert_llama3(text, notes);
         notes.push("已把 Llama 3 模板转换为 G1 plain".to_string());
         return Some(parsed);
@@ -782,6 +1005,34 @@ fn convert_foreign(text: &str, notes: &mut Vec<String>) -> Option<Parsed> {
         return Some(parsed);
     }
     None
+}
+
+/// 标记是否位于行首；行首之前只允许出现其它协议标记/空白（Llama 3 的
+/// `<|begin_of_text|>` 会和 `<|start_header_id|>` 连在同一行）。
+fn marker_at_line_start(text: &str, marker: &str) -> bool {
+    text.match_indices(marker).any(|(idx, _)| {
+        let line_start = text[..idx].rfind('\n').map_or(0, |p| p + 1);
+        let mut rest = text[line_start..idx].trim();
+        loop {
+            let mut stripped = false;
+            for allowed in [
+                "<|begin_of_text|>",
+                "<|end_of_text|>",
+                "<|endoftext|>",
+                "<|eot_id|>",
+                "<|im_end|>",
+            ] {
+                if let Some(next) = rest.strip_prefix(allowed) {
+                    rest = next.trim();
+                    stripped = true;
+                }
+            }
+            if !stripped {
+                break;
+            }
+        }
+        rest.is_empty()
+    })
 }
 
 fn convert_chatml(text: &str, notes: &mut Vec<String>) -> Parsed {
@@ -802,7 +1053,9 @@ fn convert_chatml(text: &str, notes: &mut Vec<String>) -> Parsed {
         if let Some(label) = chat_label(role.trim()) {
             out.msgs.push(Msg {
                 label,
-                content: content.trim_matches('\n').to_string(),
+                content: strip_protocol_markers(content)
+                    .trim_matches('\n')
+                    .to_string(),
                 inline: true,
             });
         } else {
@@ -872,10 +1125,16 @@ fn chat_label(role: &str) -> Option<Label> {
 }
 
 fn strip_protocol_markers(text: &str) -> String {
+    // 协议标记是模板脚手架，不是内容；残留任意一个都会让下一轮 `convert_foreign`
+    // 再次命中，修复结果就不是固定点了。
     text.replace("<|begin_of_text|>", "")
         .replace("<|end_of_text|>", "")
         .replace("<|endoftext|>", "")
         .replace("<|eot_id|>", "")
+        .replace("<|im_start|>", "")
+        .replace("<|im_end|>", "")
+        .replace("<|start_header_id|>", "")
+        .replace("<|end_header_id|>", "")
         .trim_matches('\n')
         .to_string()
 }
@@ -1016,21 +1275,16 @@ fn convert_markdown(text: &str) -> Parsed {
     out
 }
 
-/// 识别 Markdown 角色头：`## User`、`**User:**`、`> User:`、`- User:`。
+/// 识别 Markdown 角色头：`## User`、`**User:**`、`> User:`。
 /// 只接受关卡标记开头的行，裸 `User:` 由 `split_label_any` 处理。
+/// 不把 `- User:` 当角色头——列表项在 prompt 里太常见，误判会吞掉正文。
 fn markdown_header(line: &str) -> Option<(Label, &str)> {
     let t = line.trim_start();
-    if !(t.starts_with('#')
-        || t.starts_with("**")
-        || t.starts_with('*')
-        || t.starts_with("> ")
-        || t.starts_with("- ")
-        || t.starts_with("+ "))
-    {
+    if !(t.starts_with('#') || t.starts_with("**") || t.starts_with('*') || t.starts_with("> ")) {
         return None;
     }
     let t = t.trim_start_matches('#').trim_start();
-    let t = t.trim_start_matches(['*', '-', '>', '+', ' ']);
+    let t = t.trim_start_matches(['*', '>', ' ']);
     const NAMES: [(&str, Label); 7] = [
         ("Assistant", Label::Assistant),
         ("System", Label::System),

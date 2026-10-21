@@ -64,7 +64,7 @@ struct FixArgs {
     /// 只做安全修复（标签/空白/空行/think/Tools），不改结构。
     #[arg(long, conflicts_with = "structural_only")]
     safe_only: bool,
-    /// 只做结构修复（转换/合并/补生成点），不额外做安全归一。
+    /// 只做结构修复（转换/合并/补生成点）；输出仍按官方写法渲染。
     #[arg(long)]
     structural_only: bool,
     /// 去掉 `[seg 12 · user]` 这类记忆元数据前缀（内容编辑，默认关）。

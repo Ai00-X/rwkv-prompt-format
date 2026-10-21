@@ -50,14 +50,15 @@ cat chatml.txt | rwkv-pf fix --stdin > g1.txt
 | 参数 | 含义 |
 |---|---|
 | `--safe-only` | 只做安全修复，不改结构 |
-| `--structural-only` | 只做结构修复（转换/合并/补生成点） |
+| `--structural-only` | 只做结构修复（转换/合并/补生成点）；标签与空白仍按官方写法渲染 |
 | `--strip-metadata` | 去掉行首 `[seg 12 · user]` 记忆元数据前缀（默认关，内容编辑） |
 | `--in-place` | 写回 `--file`（需配 `--file`） |
 | `--quiet` | 不打印 stderr 摘要 |
 
 退出码：`0` 成功；`1` 检查/修复后仍有 error（`--no-fail` 可关）；`2` 读文件或参数错误。
 
-默认 `fix` 把修复后的文本写到 stdout，把摘要写到 stderr（JSON 模式除外），因此
+默认 `fix` 把修复后的文本写到 stdout，把摘要写到 stderr；`--json` 时 stdout 是
+`FixResult` JSON，摘要仍在 stderr。`--quiet` 关闭摘要，因此
 `cat x | rwkv-pf fix --stdin > y` 是安全的。
 
 ### 人读输出
@@ -135,19 +136,29 @@ OK（0 error / 0 warn）· 格式 plain_chat · 生成点 L5 assistant
 - 块间空行数量、内容里的空行、末尾空行、首部空行；
 - `Tools:` 的大小写/冒号/位置；
 - think 前缀（`<THINK>`、`<think >`、`<think>\n</think>` 等 → 官方形式）；
-- `(think)` / `( think )` / `(Think a bit)` 等提示 → 句末唯一的官方写法。
+- `(think)` / `( think )` / `(Think a bit)` 等提示 → 句末唯一的官方写法；
+- 未闭合的 ``` 围栏补一行闭合（`UNCLOSED_CODE_FENCE`），围栏内文本不动。
+
+文件末尾换行**按原样保留**：原来有就保留，没有就不加。修复器不替调用方决定
+文件级换行策略。
 
 **结构修复**（`--structural-only`，`FIX_STRUCTURAL`）：
 
 - ChatML（`<|im_start|>`…`<|im_end|>`）、Llama 3（`<|start_header_id|>`…）、
   JSONL（每行 `{"role","content"}` 或整个 JSON 数组/`{"messages":[…]}`）、
   Markdown（`## User`、`**User:**`、`> User:` 等）→ G1 plain；
+  只转换**行首**的模板标记；`User: <|im_start|>user` 这种行内标记视为正文，
+  不拆块（避免把内容改乱），检测器会报 `FOREIGN_MARKER`；
+  `- User: …` 这类列表项也是正文，不当 Markdown 角色行；
 - `Human:` / `AI:` / `Question:` / `Answer:` → 官方标签；
 - 多个 `System:` 合并为一个（含 `Tools:` 时置顶并给出复核说明）；
 - 连续同角色块合并；
 - Instruction 块重排为 `System → Instruction → Input → Response`；
 - 末尾缺生成点时补 `Assistant:` / `Response:`；
-- 无任何标签的纯文本 → `User:` + 生成点；有标签前的散落文本 → 并入 `System:`。
+- 无任何标签的纯文本 → `User:` + 生成点；有标签前的散落文本 → 并入 `System:`；
+- 末尾续写标签（`English:` / `English: A principios` 等 12 种语言名）单独保留为
+  生成点，不与上一块的空行折叠；检测器把「对话 + 末尾续写标签」归为
+  `format=continuation`。
 
 **不做**的事（有意为之）：
 
@@ -187,7 +198,7 @@ rwkv_pf_free_string(json);
 
 | 语言 | 文件 | 传输 | 状态 |
 |---|---|---|---|
-| Python | `bindings/python/rwkv_prompt_format.py` | ctypes | ✅ 已测（Python 3.13） |
+| Python | `bindings/python/rwkv_prompt_format.py` | ctypes | ✅ 已测（Python 3.12；兼容 3.8+） |
 | Node.js | `bindings/node/index.js` + `index.d.ts` | [koffi](https://koffi.dev) FFI | ✅ 已测（Node 22 + koffi 3.3.3） |
 | Go | `bindings/go/` | JSON CLI（`os/exec`，无 cgo） | ✅ 已测（Go 1.25） |
 | Java | `bindings/java/ai00x/rwkv/RwkvPromptFormat.java` | JNA | ⚠️ 未运行验证（本机无 JDK） |
@@ -228,7 +239,8 @@ string fixed  = RwkvPromptFormat.FixText(text);
 
 - 只检查**格式**，不判断回答对错；也不加载模型做 perplexity。
 - 只支持 G1/G1x 官方模板。ChatML/Llama 3/JSONL/Markdown 是**输入**格式，会被转成
-  G1；其它模板（Llama 2、Mistral、私有 chat template）不猜。
+  G1；其它模板（Llama 2、Mistral、私有 chat template）不猜，也不会把行内出现的
+  `<|im_start|>` 当作结构标记。
 - 规则码是稳定 API；`message` / `evidence` 文案可能改进，不建议用于断言。
 - 修复后仍可能残留 error（例如 `Assistant:` 开头、混合 instruction/chat），
   报告会逐条列出，`notes` 会说明为何不自动处理。
@@ -236,8 +248,22 @@ string fixed  = RwkvPromptFormat.FixText(text);
 
 ## 测试
 
-仓库内的行为测试（ctypes 覆盖 CLI 与 C ABI、幂等性、转换路径）位于 `test/`，
-按工作区规则为临时产物，完成后删除。基线校验命令：
+按工作区规则，测试脚本放在 `test/` 且为临时产物（验证完成后删除）。2026-10-21
+的验证基线：
+
+| 套件 | 规模 | 覆盖 |
+|---|---|---|
+| `check` 矩阵 | 73 例 | 每种 format 的 finding code/severity/line、生成点、stats 交叉校验、确定性 |
+| `fix` 精确输出 | 34 例 | safe / structural / metadata 三档的逐字输出、外部模板转换 |
+| `fix` 模式不变量 | 44 例 | 三档参数下 `changed/after/ok/applied/notes` 一致性、幂等 |
+| 确定性模糊 | 6000 例 | 四档参数各 1500 例随机标签/冒号/空白/围栏/外部模板；`fix(fix(x)) == fix(x)`、`after == check(text)`、残错必有 notes、输出无 CR/BOM |
+| CLI | 27 项 | 退出码 0/1/2、三种输入源、`--json`、`--quiet`、`--in-place`、非法 UTF-8、Unicode 与 1 MB 往返 |
+| C ABI | 1 套 | FFI 与 CLI 的 JSON 逐字段一致、8 线程并发、3000 次调用内存稳定、NULL/非法 UTF-8、静态版本指针、1 MB 输入 |
+| 语言封装 | 3 套 | Python、Node(koffi)、Go 的 check/fix/幂等/Unicode/大输入 parity |
+
+以上测试全部为 **0 失败**。Java/C# 封装因本机无 JDK/.NET 未运行验证。
+
+基线校验命令：
 
 ```bash
 cargo fmt --all && cargo clippy --all-targets -- -D warnings

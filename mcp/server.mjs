@@ -72,6 +72,110 @@ Use this before writing or repairing a prompt for an RWKV G1/G1x checkpoint.
    and \`notes\`; do not invent fixes that change meaning.
 4. Re-run \`check_prompt_format\` on the final text if you edited it manually.`;
 
+// Output schemas are intentionally additive: no additionalProperties:false, so
+// new report fields never break clients that validate structuredContent.
+const FINDING_SCHEMA = {
+  type: 'object',
+  properties: {
+    code: { type: 'string', description: 'Stable rule code, e.g. EXTRA_BLANK_SEPARATOR.' },
+    severity: { type: 'string', enum: ['error', 'warn', 'info'] },
+    line: { type: 'integer', minimum: 0, description: '1-based line; 0 means whole-text.' },
+    message: { type: 'string' },
+    evidence: { type: 'string' },
+  },
+  required: ['code', 'severity', 'line', 'message', 'evidence'],
+};
+
+const STATS_SCHEMA = {
+  type: 'object',
+  properties: {
+    chars: { type: 'integer' },
+    lines: { type: 'integer' },
+    user_blocks: { type: 'integer' },
+    assistant_blocks: { type: 'integer' },
+    system_blocks: { type: 'integer' },
+    instruction_blocks: { type: 'integer' },
+    input_blocks: { type: 'integer' },
+    response_blocks: { type: 'integer' },
+    blank_separators: { type: 'integer' },
+    max_blank_run: { type: 'integer' },
+    metadata_lines: { type: 'integer' },
+    think_prefix: { type: 'boolean' },
+    function_call: { type: 'boolean' },
+  },
+  required: [
+    'chars', 'lines', 'user_blocks', 'assistant_blocks', 'system_blocks',
+    'instruction_blocks', 'input_blocks', 'response_blocks', 'blank_separators',
+    'max_blank_run', 'metadata_lines', 'think_prefix', 'function_call',
+  ],
+};
+
+const REPORT_SCHEMA = {
+  type: 'object',
+  properties: {
+    profile: { type: 'string' },
+    format: {
+      type: 'string',
+      enum: [
+        'plain_chat', 'material_qa', 'instruction', 'instruction_chat', 'system_tools',
+        'chatml', 'markdown', 'jsonl', 'continuation', 'unknown',
+      ],
+    },
+    ok: { type: 'boolean', description: 'True when error_count is 0.' },
+    error_count: { type: 'integer' },
+    warning_count: { type: 'integer' },
+    info_count: { type: 'integer' },
+    generation_point: {
+      type: ['object', 'null'],
+      properties: {
+        line: { type: 'integer' },
+        role: { type: 'string' },
+        seeded: { type: 'boolean' },
+      },
+      required: ['line', 'role', 'seeded'],
+    },
+    stats: STATS_SCHEMA,
+    findings: { type: 'array', items: FINDING_SCHEMA },
+  },
+  required: [
+    'profile', 'format', 'ok', 'error_count', 'warning_count', 'info_count',
+    'generation_point', 'stats', 'findings',
+  ],
+};
+
+const FIX_RESULT_SCHEMA = {
+  type: 'object',
+  properties: {
+    changed: { type: 'boolean' },
+    options: {
+      type: 'object',
+      properties: {
+        safe: { type: 'boolean' },
+        structural: { type: 'boolean' },
+        strip_metadata: { type: 'boolean' },
+      },
+      required: ['safe', 'structural', 'strip_metadata'],
+    },
+    applied: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          code: { type: 'string' },
+          count: { type: 'integer' },
+          message: { type: 'string' },
+        },
+        required: ['code', 'count', 'message'],
+      },
+    },
+    notes: { type: 'array', items: { type: 'string' } },
+    before: REPORT_SCHEMA,
+    after: REPORT_SCHEMA,
+    text: { type: 'string', description: 'The fixed prompt.' },
+  },
+  required: ['changed', 'options', 'applied', 'notes', 'before', 'after', 'text'],
+};
+
 const TOOLS = [
   {
     name: 'check_prompt_format',
@@ -91,6 +195,7 @@ const TOOLS = [
       required: ['text'],
       additionalProperties: false,
     },
+    outputSchema: REPORT_SCHEMA,
     annotations: {
       readOnlyHint: true,
       destructiveHint: false,
@@ -128,6 +233,7 @@ const TOOLS = [
       required: ['text'],
       additionalProperties: false,
     },
+    outputSchema: FIX_RESULT_SCHEMA,
     annotations: {
       readOnlyHint: false,
       destructiveHint: false,
@@ -145,6 +251,11 @@ const TOOLS = [
       type: 'object',
       properties: {},
       additionalProperties: false,
+    },
+    outputSchema: {
+      type: 'object',
+      properties: { rules: { type: 'string', description: 'Markdown cheat sheet.' } },
+      required: ['rules'],
     },
     annotations: {
       readOnlyHint: true,

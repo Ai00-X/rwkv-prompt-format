@@ -306,7 +306,10 @@ Node 22 中验证了 bytes / ArrayBuffer / Response / URL / Module 五种 `init`
 
 资源：`rwkv-prompt-format://rules`（`text/markdown`）。工具结果同时给
 `content[].text`（人类可读 JSON）与 `structuredContent`（机器可读）；参数错误
-返回 `isError: true`，未知工具返回 JSON-RPC `-32602`。
+返回 `isError: true`，未知工具返回 JSON-RPC `-32602`。每个工具都带 `title`、
+`annotations`（check/rules 只读、fix 幂等且非破坏）与 `outputSchema`，
+`initialize` 还会返回一段 `instructions`，便于客户端直接提示 agent 走
+check → fix → 复核流程。
 
 配置（安装器会自动写这一段）：
 
@@ -386,8 +389,8 @@ node scripts/install-agent.mjs --scope user --uninstall --yes   # 卸载
 
 ## 测试
 
-按工作区规则，测试脚本放在 `test/` 且为临时产物（验证完成后删除）。2026-10-21
-的验证基线：
+按工作区规则，一次性验证脚本放在 `test/` 且验证完成后删除。2026-10-21 的完整
+验证基线：
 
 | 套件 | 规模 | 覆盖 |
 |---|---|---|
@@ -402,18 +405,30 @@ node scripts/install-agent.mjs --scope user --uninstall --yes   # 卸载
 | MCP | 27 项 | initialize/协议版本、tools/list、三个工具、resources、错误码、结构化结果、notification 不回包、batch 拒绝、stdout 无噪声、9 KB 输入 |
 | Skill 安装器 | 48 项 | user/project/local 三 scope、配置合并保留其它键、幂等重跑、坏 JSON 不落盘、卸载所有权、安装后 MCP 实跑 |
 
-以上测试合计 **379 项，全部 0 失败**。Java/C# 封装因本机无 JDK/.NET 未运行验证；
-浏览器 WASM 未在真实浏览器中运行。
+以上一次性验证合计 **379 项，全部 0 失败**。Java/C# 封装因本机无 JDK/.NET 未运行
+验证；浏览器 WASM 未在真实浏览器中运行。
 
-基线校验命令：
+其中可重复执行的关键路径已固化为常驻门禁 `scripts/verify.mjs`（当前 **74 项**，
+`--quick` 为 34 项），不依赖临时文件，也不写仓库：
+
+| 套件 | 覆盖 |
+|---|---|
+| Rust ↔ WASM parity | 15 组语料（chat/messy/ChatML/Llama 3/JSONL/Markdown/材料问答/think/围栏/BOM+CRLF/续写/元数据/空文本/纯文本/64 KB Unicode）× check 与 safe/structural/both 三档 fix；`changed`/`after == check(text)`/残错必有 notes/幂等 |
+| MCP | initialize/instructions、tools/list（title/annotations/outputSchema）、check/fix、resources、未知方法/工具、非法 mode、NUL 拒绝、notification 不回包、ping |
+| 安装器 | user scope 安装、配置合并保留无关键、幂等重跑、安装后 MCP server 实跑、坏 JSON 不落盘、非自有条目不删、卸载清理 |
+| 元数据 | `--strip-metadata` 两栈逐字段一致 |
 
 ```bash
-cargo fmt --all && cargo clippy --all-targets -- -D warnings
+cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings
 cargo build --release
 node scripts/build-wasm.mjs --check
+node scripts/verify.mjs
 printf 'User: hi\n\n\nAssistant:' | ./target/release/rwkv-pf fix --stdin
 node wasm/cli.mjs check --text "User: hi" --json
 ```
+
+`verify.mjs` 需要 `target/release/rwkv-pf` 和已提交的 WASM；CI 把上述命令按序
+串起来即可。仓库当前没有远端，因此未附 CI 配置文件。
 
 ## License
 

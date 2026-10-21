@@ -1,7 +1,7 @@
 // Package rwkvpf is the Go binding for the RWKV G1/G1x prompt format checker
 // and auto-fixer.
 //
-// It talks to the rwkv-prompt-format JSON CLI, so it needs no cgo, no C
+// It talks to the rwkv-pf JSON CLI, so it needs no cgo, no C
 // toolchain and no shared-library discovery: build the CLI once and put it on
 // PATH (or set RWKV_PROMPT_FORMAT_CLI to its full path).
 //
@@ -104,13 +104,13 @@ type FixResult struct {
 	Text    string       `json:"text"`
 }
 
-// CLIPath returns RWKV_PROMPT_FORMAT_CLI, or "rwkv-prompt-format" so the
+// CLIPath returns RWKV_PROMPT_FORMAT_CLI, or "rwkv-pf" so the
 // system PATH decides. Override it when the binary is not installed globally.
 func CLIPath() string {
 	if path := os.Getenv("RWKV_PROMPT_FORMAT_CLI"); path != "" {
 		return path
 	}
-	return "rwkv-prompt-format"
+	return "rwkv-pf"
 }
 
 func run(args []string, stdin string) ([]byte, error) {
@@ -129,7 +129,7 @@ func run(args []string, stdin string) ([]byte, error) {
 			if detail == "" {
 				detail = err.Error()
 			}
-			return nil, fmt.Errorf("rwkv-prompt-format: %s", detail)
+			return nil, fmt.Errorf("rwkv-pf: %s", detail)
 		}
 	}
 	return stdout.Bytes(), nil

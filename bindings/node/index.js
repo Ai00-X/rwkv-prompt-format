@@ -42,7 +42,7 @@ try {
 } catch (err) {
   throw new Error(
     'rwkv-prompt-format needs the "koffi" package (pnpm add koffi). ' +
-      'Alternatively call the rwkv-prompt-format CLI from any language.',
+      'Alternatively call the rwkv-pf CLI from any language.',
   );
 }
 

@@ -1,4 +1,4 @@
-//! `rwkv-prompt-format` CLI：检查 / 自动修复，JSON 输出可被任何语言消费。
+//! `rwkv-pf` CLI：检查 / 自动修复，JSON 输出可被任何语言消费。
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -9,10 +9,10 @@ use rwkv_prompt_format::{FixOptions, FixResult, FormatReport, Severity, check, f
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "rwkv-prompt-format",
+    name = "rwkv-pf",
     version,
     about = "RWKV G1/G1x 提示词格式检查与自动修复（纯文本，不加载模型）",
-    after_help = "示例:\n  rwkv-prompt-format check --file prompt.txt\n  cat prompt.txt | rwkv-prompt-format fix --stdin\n  rwkv-prompt-format fix --file prompt.txt --in-place"
+    after_help = "示例:\n  rwkv-pf check --file prompt.txt\n  cat prompt.txt | rwkv-pf fix --stdin\n  rwkv-pf fix --file prompt.txt --in-place"
 )]
 struct Cli {
     #[command(subcommand)]

@@ -3,7 +3,7 @@
 //! 三种消费方式共用同一份 Rust 实现与同一份 JSON schema：
 //!
 //! 1. **Rust**：`rwkv_prompt_format::check` / `fix`；
-//! 2. **CLI**：`rwkv-prompt-format check|fix`（JSON 输出，任何语言都能起进程调用）；
+//! 2. **CLI**：`rwkv-pf check|fix`（JSON 输出，任何语言都能起进程调用）；
 //! 3. **C ABI**：`cdylib` / `staticlib` + `include/rwkv_prompt_format.h`，
 //!    Python / Node / Go / Java / C# 的薄封装都在 `bindings/`。
 //!

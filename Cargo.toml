@@ -12,7 +12,7 @@ name = "rwkv_prompt_format"
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [[bin]]
-name = "rwkv-prompt-format"
+name = "rwkv-pf"
 path = "src/main.rs"
 
 [dependencies]

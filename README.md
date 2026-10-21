@@ -5,7 +5,7 @@ RWKV G1/G1x 提示词**格式检查器 + 自动修复器**，独立于推理运�
 
 | 方式 | 适用 | 产物 |
 |---|---|---|
-| JSON CLI | 任何语言、脚本、CI | `rwkv-prompt-format(.exe)` |
+| JSON CLI | 任何语言、脚本、CI | `rwkv-pf(.exe)` |
 | C ABI | C/C++/Rust/任意 FFI 封装 | `rwkv_prompt_format.dll` / `.so` / `.dylib` |
 | 薄封装 | Python / Node / Go / Java / C# | 见 `bindings/` |
 
@@ -28,7 +28,7 @@ cargo fmt --all && cargo clippy --all-targets -- -D warnings   # 仓库硬规则
 
 产物（`target/release/`）：
 
-- `rwkv-prompt-format` / `.exe` —— CLI
+- `rwkv-pf` / `.exe` —— CLI（包名 `rwkv-prompt-format`，可执行文件取短名避免与库产物同名）
 - `rwkv_prompt_format.dll`（Windows）/ `librwkv_prompt_format.so`（Linux）/
   `librwkv_prompt_format.dylib`（macOS）—— C ABI 动态库
 - `rwkv_prompt_format.lib` / `librwkv_prompt_format.a` —— 静态/导入库
@@ -37,11 +37,11 @@ cargo fmt --all && cargo clippy --all-targets -- -D warnings   # 仓库硬规则
 ## CLI
 
 ```bash
-rwkv-prompt-format check --file prompt.txt
-cat prompt.txt | rwkv-prompt-format check --stdin
-rwkv-prompt-format check --text "User: hi" --json
-rwkv-prompt-format fix   --file prompt.txt --in-place
-cat chatml.txt | rwkv-prompt-format fix --stdin > g1.txt
+rwkv-pf check --file prompt.txt
+cat prompt.txt | rwkv-pf check --stdin
+rwkv-pf check --text "User: hi" --json
+rwkv-pf fix   --file prompt.txt --in-place
+cat chatml.txt | rwkv-pf fix --stdin > g1.txt
 ```
 
 `check` 与 `fix` 都支持 `--file PATH` / `--text TEXT` / `--stdin`（三选一）、
@@ -58,7 +58,7 @@ cat chatml.txt | rwkv-prompt-format fix --stdin > g1.txt
 退出码：`0` 成功；`1` 检查/修复后仍有 error（`--no-fail` 可关）；`2` 读文件或参数错误。
 
 默认 `fix` 把修复后的文本写到 stdout，把摘要写到 stderr（JSON 模式除外），因此
-`cat x | rwkv-prompt-format fix --stdin > y` 是安全的。
+`cat x | rwkv-pf fix --stdin > y` 是安全的。
 
 ### 人读输出
 
@@ -242,7 +242,7 @@ string fixed  = RwkvPromptFormat.FixText(text);
 ```bash
 cargo fmt --all && cargo clippy --all-targets -- -D warnings
 cargo build --release
-printf 'User: hi\n\n\nAssistant:' | ./target/release/rwkv-prompt-format fix --stdin
+printf 'User: hi\n\n\nAssistant:' | ./target/release/rwkv-pf fix --stdin
 ```
 
 ## License

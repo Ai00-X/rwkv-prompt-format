@@ -1,0 +1,16 @@
+{
+  "name": "rwkv-prompt-format",
+  "version": "0.1.0",
+  "description": "RWKV G1/G1x prompt format checker and auto-fixer (native binding)",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "MIT OR Apache-2.0",
+  "keywords": ["rwkv", "prompt", "format", "linter"],
+  "files": ["index.js", "index.d.ts"],
+  "engines": {
+    "node": ">=18"
+  },
+  "peerDependencies": {
+    "koffi": ">=2.8.0"
+  }
+}

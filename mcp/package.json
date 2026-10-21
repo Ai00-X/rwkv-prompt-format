@@ -1,0 +1,14 @@
+{
+  "name": "rwkv-prompt-format-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Zero-dependency MCP server for RWKV G1/G1x prompt format checking and fixing",
+  "type": "module",
+  "bin": {
+    "rwkv-pf-mcp": "./server.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT OR Apache-2.0"
+}

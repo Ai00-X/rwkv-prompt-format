@@ -14,11 +14,25 @@ crate-type = ["lib", "cdylib", "staticlib"]
 [[bin]]
 name = "rwkv-pf"
 path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+cli = ["dep:clap"]
 
 [dependencies]
-clap = { version = "4.6", features = ["derive"] }
+clap = { version = "4.6", features = ["derive"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 [profile.release]
 lto = "thin"
+
+# WASM 体积优先；构建命令会显式指定该 profile。
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,11 +1,15 @@
 //! RWKV 提示词格式检测与自动修复。
 //!
-//! 三种消费方式共用同一份 Rust 实现与同一份 JSON schema：
+//! 六种消费方式共用同一份 Rust 实现与同一份 JSON schema：
 //!
 //! 1. **Rust**：`rwkv_prompt_format::check` / `fix`；
 //! 2. **CLI**：`rwkv-pf check|fix`（JSON 输出，任何语言都能起进程调用）；
 //! 3. **C ABI**：`cdylib` / `staticlib` + `include/rwkv_prompt_format.h`，
-//!    Python / Node / Go / Java / C# 的薄封装都在 `bindings/`。
+//!    Python / Node / Go / Java / C# 的薄封装都在 `bindings/`；
+//! 4. **WASM**：`wasm/rwkv_prompt_format.wasm` + `wasm/index.mjs`；
+//! 5. **MCP**：`mcp/server.mjs`（零依赖 stdio，AI agent 直接调用）；
+//! 6. **Skill**：`skills/rwkv-prompt-format/`，由 `scripts/install-agent.mjs`
+//!    一键安装到 Qoder。
 //!
 //! 规则来源是 RWKV 官方 G1/G1x 模板（2026-10-21 逐字抓取），不是猜测：
 //! `User: xxx\n\nAssistant:`、`System: xxx\n\nUser: xxx\n\nAssistant:`、
@@ -18,6 +22,9 @@ mod check;
 mod ffi;
 mod fix;
 mod types;
+
+#[cfg(target_arch = "wasm32")]
+mod wasm;
 
 pub use check::check;
 pub use fix::{

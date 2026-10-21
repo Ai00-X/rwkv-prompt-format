@@ -1,13 +1,16 @@
 # rwkv-prompt-format
 
 RWKV G1/G1x 提示词**格式检查器 + 自动修复器**，独立于推理运行时：纯文本输入，
-不加载模型、不碰 GPU、不读写磁盘。三种消费方式：
+不加载模型、不碰 GPU、不读写磁盘。六种消费方式：
 
 | 方式 | 适用 | 产物 |
 |---|---|---|
 | JSON CLI | 任何语言、脚本、CI | `rwkv-pf(.exe)` |
 | C ABI | C/C++/Rust/任意 FFI 封装 | `rwkv_prompt_format.dll` / `.so` / `.dylib` |
 | 薄封装 | Python / Node / Go / Java / C# | 见 `bindings/` |
+| WASM | Node / 浏览器 / Edge / 任意 WASM 宿主 | `wasm/rwkv_prompt_format.wasm` + `wasm/index.mjs` |
+| MCP | Qoder / Claude Desktop 等 AI agent | `mcp/server.mjs`（零依赖 stdio） |
+| Skill | AI agent 的触发规则与工作流 | `skills/rwkv-prompt-format/` |
 
 规则来自官方模板（[BlinkDL/RWKV-LM · RWKV7-G1x-templates.txt](https://github.com/BlinkDL/RWKV-LM/blob/main/RWKV-v7/RWKV7-G1x-templates.txt)），
 而不是本仓的猜测。要点：
@@ -24,6 +27,10 @@ RWKV G1/G1x 提示词**格式检查器 + 自动修复器**，独立于推理运�
 cd rwkv-prompt-format
 cargo build --release
 cargo fmt --all && cargo clippy --all-targets -- -D warnings   # 仓库硬规则
+
+# WASM（需要 rustup target add wasm32-unknown-unknown）
+node scripts/build-wasm.mjs          # 构建并复制到 wasm/
+node scripts/build-wasm.mjs --check  # CI：产物过期则退出码 1
 ```
 
 产物（`target/release/`）：
@@ -33,6 +40,9 @@ cargo fmt --all && cargo clippy --all-targets -- -D warnings   # 仓库硬规则
   `librwkv_prompt_format.dylib`（macOS）—— C ABI 动态库
 - `rwkv_prompt_format.lib` / `librwkv_prompt_format.a` —— 静态/导入库
 - 头文件：`include/rwkv_prompt_format.h`
+
+WASM 产物固定为 `wasm/rwkv_prompt_format.wasm`（约 203 KB，无任何 import），
+`wasm/index.mjs` 是零依赖封装。
 
 ## CLI
 
@@ -119,7 +129,7 @@ OK（0 error / 0 warn）· 格式 plain_chat · 生成点 L5 assistant
   "notes": [],
   "before": { "...": "FormatReport" },
   "after": { "...": "FormatReport" },
-  "text": "User: hi\n\nAssistant:\n"
+  "text": "User: hi\n\nAssistant:"
 }
 ```
 
@@ -235,6 +245,125 @@ string report = RwkvPromptFormat.CheckJson(text);
 string fixed  = RwkvPromptFormat.FixText(text);
 ```
 
+## WASM
+
+同一份 Rust 核心编译成 `wasm32-unknown-unknown`，复用 C ABI 的
+`rwkv_pf_check/fix/fix_text/free_string`，另加三个只给 WASM 用的导出：
+
+| 导出 | 说明 |
+|---|---|
+| `rwkv_pf_wasm_alloc(len) -> ptr` | 分配 `len` 字节（零填充），给输入串用 |
+| `rwkv_pf_wasm_free(ptr, len)` | 释放输入缓冲区 |
+| `rwkv_pf_wasm_abi() -> u32` | ABI 版本，当前 `1` |
+
+- 模块**没有任何 import**，只导出 `memory` 与上述函数；不需要 wasm-bindgen。
+- 输入缓冲末尾必须是 NUL（`index.mjs` 自动处理）；返回串用
+  `rwkv_pf_free_string` 释放。
+- 体积 202,998 bytes，sha256 `c0fe38e101b40986b4c99cf345b07f30ed50df24d9d0cb5bc033724b21ffbed6`；
+  `wasm-release` profile 使用 `opt-level="z"` + LTO + `panic="abort"` + strip。
+
+Node：
+
+```js
+import { check, fix, fixText, FIX_ALL } from './wasm/index.mjs';
+
+const report = await check(text);
+const fixed  = await fix(text, FIX_ALL);
+const text2  = await fixText(text, FIX_ALL);
+```
+
+Node 自动加载同目录的 `.wasm`。浏览器/Edge：
+
+```js
+import { init, check } from './wasm/index.mjs';
+await init(new URL('./rwkv_prompt_format.wasm', import.meta.url));
+const report = await check(text);
+```
+
+`init(source)` 接受 URL/路径字符串、`Response`、`ArrayBuffer`、TypedArray 或
+`WebAssembly.Module`。flags：`FIX_SAFE=1`、`FIX_STRUCTURAL=2`、
+`FIX_STRIP_METADATA=4`、`FIX_ALL=3`。CLI：
+
+```bash
+node wasm/cli.mjs check --stdin --json < prompt.txt
+node wasm/cli.mjs fix --stdin < prompt.txt
+```
+
+与 Rust CLI 的 `check` / `fix --json` 输出**逐字段一致**（30 组输入 × 4 档参数），
+退出码也一致。浏览器加载路径按标准 API 实现，但本机没有真实浏览器环境，只在
+Node 22 中验证了 bytes / ArrayBuffer / Response / URL / Module 五种 `init` 入口。
+
+## MCP server
+
+`mcp/server.mjs` 是零依赖 stdio MCP server（Node ≥ 18），把同一份 WASM 暴露成
+三个工具：
+
+| 工具 | 参数 | 作用 |
+|---|---|---|
+| `check_prompt_format` | `{ text }` | 返回 `FormatReport` |
+| `fix_prompt_format` | `{ text, mode?: "safe"/"structural"/"both", strip_metadata?: boolean }` | 返回 `FixResult`（含 `text`） |
+| `get_prompt_format_rules` | `{}` | 返回压缩版官方规则 |
+
+资源：`rwkv-prompt-format://rules`（`text/markdown`）。工具结果同时给
+`content[].text`（人类可读 JSON）与 `structuredContent`（机器可读）；参数错误
+返回 `isError: true`，未知工具返回 JSON-RPC `-32602`。
+
+配置（安装器会自动写这一段）：
+
+```json
+{
+  "mcpServers": {
+    "rwkv-prompt-format": {
+      "command": "node",
+      "args": ["C:/work/ai00-x-dev/rwkv-prompt-format/mcp/server.mjs"]
+    }
+  }
+}
+```
+
+- 传输是 **newline-delimited JSON-RPC 2.0**（MCP stdio 规范），不是
+  `Content-Length` 帧；stdout 只走协议，日志全部走 stderr。
+- 支持协议版本 `2024-11-05` / `2025-03-26` / `2025-06-18`，未知版本回落
+  `2025-06-18`；输入上限 8 MiB。
+- 纯文本、无网络、不读用户文件；可并发，不保存会话状态。
+
+## Skill 与一句话安装
+
+`skills/rwkv-prompt-format/` 是给 AI agent 的 skill：`SKILL.md` 说明何时检查、
+check → fix → verify 的工作流、硬规则和禁止事项；`references/rules.md` 是完整规则
+与 finding code 参考。skill 附带的 `wasm/cli.mjs` 可在 MCP 不可用时兜底。
+
+安装器 `scripts/install-agent.mjs` 做两件事：
+
+1. 把 skill、MCP server、WASM 复制成自包含目录（不依赖本仓路径）；
+2. 在 Qoder 配置里合并 `mcpServers["rwkv-prompt-format"]`（保留其它键，
+   写前备份，原子替换；配置 JSON 损坏时**不写任何文件**）。
+
+| scope | skill 安装到 | MCP 配置写到 |
+|---|---|---|
+| `user`（默认） | `~/.qoder-cn/skills/rwkv-prompt-format/` | `~/.qoder-cn/settings.json` |
+| `project` | `<project>/.qoder/skills/rwkv-prompt-format/` | `<project>/.qoder/settings.json` |
+| `local` | `<project>/.qoder/skills/rwkv-prompt-format/` | `<project>/.qoder/settings.local.json` |
+
+一句话安装（把这段发给 Qoder/任意 agent）：
+
+> 运行 `node C:\work\ai00-x-dev\rwkv-prompt-format\scripts\install-agent.mjs --scope user --yes`，
+> 然后提醒我执行 `/mcp reload` 和 `/skills reload`；之后处理 RWKV 提示词时先用
+> `check_prompt_format` 检查，必要时用 `fix_prompt_format`（`mode="both"`）修复并确认
+> `after.ok`。
+
+或者自己跑：
+
+```bash
+node scripts/install-agent.mjs --scope user --yes
+node scripts/install-agent.mjs --scope user --dry-run          # 只看计划
+node scripts/install-agent.mjs --scope user --uninstall --yes   # 卸载
+```
+
+安装后必须重载：`/mcp reload`（MCP）与 `/skills reload`（或重启会话）。
+卸载只删安装器自己写入的 MCP 条目和 skill 目录；同名但指向别处的条目会保留并以
+退出码 1 提示。
+
 ## 能力边界
 
 - 只检查**格式**，不判断回答对错；也不加载模型做 perplexity。
@@ -244,7 +373,16 @@ string fixed  = RwkvPromptFormat.FixText(text);
 - 规则码是稳定 API；`message` / `evidence` 文案可能改进，不建议用于断言。
 - 修复后仍可能残留 error（例如 `Assistant:` 开头、混合 instruction/chat），
   报告会逐条列出，`notes` 会说明为何不自动处理。
-- CLI 每次启动约数毫秒；批量场景用 C ABI/ctypes/koffi，不要循环起进程。
+- CLI 每次启动约数毫秒；批量场景用 C ABI/ctypes/koffi/WASM，不要循环起进程。
+- WASM 是纯 `wasm32-unknown-unknown` 模块，不依赖 WASI，不能读写文件或网络；
+  调用方负责加载/传参。浏览器加载路径未在真实浏览器中跑过；如需更小体积可再
+  接 `wasm-opt`（本机未安装）。
+- MCP 只有 stdio 传输（没有 HTTP/SSE），需要 Node ≥ 18；工具输入上限 8 MiB。
+- C ABI/WASM 的输入以 NUL 结尾，因此文本不能含 `\0`；WASM 封装与 MCP 会显式
+  拒绝并报错，不会静默截断。
+- 安装器目前只写 Qoder 的 `settings.json` / `settings.local.json` 与 skill 目录；
+  Claude Desktop/Cursor 等其它客户端需要手动复制 MCP 配置。安装后必须
+  `/mcp reload` 与 `/skills reload`（或重启会话）才生效。
 
 ## 测试
 
@@ -260,15 +398,21 @@ string fixed  = RwkvPromptFormat.FixText(text);
 | CLI | 27 项 | 退出码 0/1/2、三种输入源、`--json`、`--quiet`、`--in-place`、非法 UTF-8、Unicode 与 1 MB 往返 |
 | C ABI | 1 套 | FFI 与 CLI 的 JSON 逐字段一致、8 线程并发、3000 次调用内存稳定、NULL/非法 UTF-8、静态版本指针、1 MB 输入 |
 | 语言封装 | 3 套 | Python、Node(koffi)、Go 的 check/fix/幂等/Unicode/大输入 parity |
+| WASM（含封装） | 304 项 | 30 组输入 × 4 档参数与 Rust CLI 的 check/fix JSON 逐字段一致、退出码一致、幂等；五种 `init` 入口；1 MB；100 并发；5000 次 alloc/free 内存稳定；无 import |
+| MCP | 27 项 | initialize/协议版本、tools/list、三个工具、resources、错误码、结构化结果、notification 不回包、batch 拒绝、stdout 无噪声、9 KB 输入 |
+| Skill 安装器 | 48 项 | user/project/local 三 scope、配置合并保留其它键、幂等重跑、坏 JSON 不落盘、卸载所有权、安装后 MCP 实跑 |
 
-以上测试全部为 **0 失败**。Java/C# 封装因本机无 JDK/.NET 未运行验证。
+以上测试合计 **379 项，全部 0 失败**。Java/C# 封装因本机无 JDK/.NET 未运行验证；
+浏览器 WASM 未在真实浏览器中运行。
 
 基线校验命令：
 
 ```bash
 cargo fmt --all && cargo clippy --all-targets -- -D warnings
 cargo build --release
+node scripts/build-wasm.mjs --check
 printf 'User: hi\n\n\nAssistant:' | ./target/release/rwkv-pf fix --stdin
+node wasm/cli.mjs check --text "User: hi" --json
 ```
 
 ## License

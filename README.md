@@ -6,6 +6,7 @@ English | [简体中文](README.zh-CN.md)
 ![Rust](https://img.shields.io/badge/rust-edition%202024-orange)
 ![Node](https://img.shields.io/badge/node-%E2%89%A518-green)
 ![WASM](https://img.shields.io/badge/wasm-203%20KB-purple)
+![CI](https://github.com/Ai00-X/rwkv-prompt-format/actions/workflows/ci.yml/badge.svg)
 
 A **format checker and auto-fixer for RWKV G1/G1x prompts**. It is independent of the
 inference runtime: it takes plain text, never loads a model, never touches a GPU, and
@@ -493,13 +494,43 @@ The repeatable critical paths are checked in as `scripts/verify.mjs` (**74 check
 cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings
 cargo build --release
 node scripts/build-wasm.mjs --check
+node scripts/check-wasm-fresh.mjs
 node scripts/verify.mjs
 printf 'User: hi\n\n\nAssistant:' | ./target/release/rwkv-pf fix --stdin
 node wasm/cli.mjs check --text "User: hi" --json
 ```
 
-`verify.mjs` needs `target/release/rwkv-pf` and the committed WASM. A CI job can run
-these commands in order; no workflow file is included yet.
+`verify.mjs` needs `target/release/rwkv-pf` and the committed WASM.
+
+## CI and releases
+
+`.github/workflows/ci.yml` runs on every push and pull request:
+
+| Job | What it gates |
+|---|---|
+| `rust` | `cargo fmt --all -- --check`, `cargo clippy --all-targets --release -- -D warnings`, `cargo test --release` |
+| `wasm` | `node scripts/check-wasm-fresh.mjs` — is the committed `.wasm` still built from the current source? |
+| `verify` | `node scripts/verify.mjs` — the 74-check regression gate above |
+
+The WASM gate is deliberately **not** a byte comparison. A rustc upgrade can change
+the artifact bytes while the behaviour is identical, so a byte gate would go red on
+every toolchain bump and hide the thing it is meant to catch. `check-wasm-fresh.mjs`
+builds the WASM from the current source and replays the same corpus through both
+artifacts: identical bytes are reported, differing bytes are only a notice, and a
+**behavioural** difference fails the build.
+
+`.github/workflows/release.yml` runs on a `v*` tag:
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+It refuses to publish unless the tag matches the `Cargo.toml` version, builds the CLI
+and the C ABI for `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`,
+`x86_64-apple-darwin` and `x86_64-pc-windows-msvc`, packs the WASM bundle, writes
+`SHA256SUMS.txt`, and creates the GitHub Release with `gh release create`. Publishing
+to crates.io is opt-in: run the workflow manually with `publish_crates=true` and a
+`CARGO_REGISTRY_TOKEN` secret.
 
 ## Contributing
 

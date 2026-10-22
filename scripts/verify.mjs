@@ -24,6 +24,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import os from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { pickCorpus } from './lib/corpus.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const QUICK = process.argv.includes('--quick');
@@ -85,35 +86,8 @@ function fixArgs(mode, extra = []) {
   return ['fix', '--stdin', '--json', '--quiet', '--no-fail', ...flags, ...extra];
 }
 
-const CORPUS = [
-  ['chat-ok', 'User: hi\n\nAssistant:'],
-  ['messy-labels', 'user : hi\n\n\nassistant : '],
-  [
-    'chatml',
-    '<|im_start|>system\nYou are helpful.<|im_end|>\n' +
-      '<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n',
-  ],
-  [
-    'llama3',
-    '<|start_header_id|>system<|end_header_id|>\n\nBe nice<|eot_id|>' +
-      '<|start_header_id|>user<|end_header_id|>\n\nHi<|eot_id|>' +
-      '<|start_header_id|>assistant<|end_header_id|>\n\n',
-  ],
-  ['jsonl', '{"role":"system","content":"Be nice"}\n{"role":"user","content":"Hi"}\n'],
-  ['markdown', '## System\nBe nice\n\n## User\nHi\n'],
-  ['material-qa', 'User:\n材料：天空是蓝的。\n问题：为什么？\n\nAssistant: {"answer": '],
-  ['think', 'User: 解释一下 (Think a Lot)\n\nAssistant: <THINK>'],
-  ['unclosed-fence', 'User: 看代码\n```rust\nfn main() {}\n\nAssistant:'],
-  ['bom-crlf', '\uFEFFUser: hi\r\n\r\nAssistant:'],
-  ['continuation', 'User: 翻译\n\nAssistant: 你好\n\nEnglish:'],
-  ['metadata', '[seg 12 · user]\nUser: hi\n\nAssistant:'],
-  ['empty', ''],
-  ['plain-text', 'hello world'],
-  ['unicode-large', `User: ${'中文🙂'.repeat(4096)}\n\nAssistant:`],
-];
+const corpus = pickCorpus(QUICK);
 
-const QUICK_NAMES = new Set(['chat-ok', 'messy-labels', 'chatml', 'material-qa', 'bom-crlf']);
-const corpus = QUICK ? CORPUS.filter(([name]) => QUICK_NAMES.has(name)) : CORPUS;
 
 function paritySuite() {
   for (const [name, text] of corpus) {

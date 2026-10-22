@@ -1,0 +1,208 @@
+name: release
+
+# 打 tag 即出 release：
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# 产出（都挂在 GitHub Release 上）：
+#   rwkv-prompt-format-<tag>-<target>.tar.gz   CLI + C ABI（.so/.dylib/.dll + .a/.lib）+ 头文件
+#   rwkv-prompt-format-wasm-<tag>.tar.gz       WASM（.wasm + cli.mjs/index.mjs/index.d.ts）
+#   rwkv_prompt_format.wasm                    单个 wasm 产物（不想解包的人直接用）
+#   SHA256SUMS.txt                             上面所有文件的校验和
+#
+# tag 必须等于 Cargo.toml 的版本号（v<version>），否则拒绝发布。
+# crates.io 发布是**手动开关**（workflow_dispatch + publish_crates=true）。
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build, e.g. v0.1.0'
+        required: true
+        type: string
+      publish_crates:
+        description: 'Also publish to crates.io (needs the CARGO_REGISTRY_TOKEN secret)'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  version:
+    name: tag / version gate
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: meta
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          if [ -z "$version" ]; then echo "::error::cannot read version from Cargo.toml"; exit 1; fi
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            tag="$INPUT_TAG"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          if [ "$tag" != "v$version" ]; then
+            echo "::error::tag '$tag' does not match Cargo.toml version '$version' (expected v$version)"
+            exit 1
+          fi
+          if ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "::error::tag '$tag' does not exist in this repository"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "releasing $tag (version $version)"
+
+  build:
+    name: build ${{ matrix.target }}
+    needs: version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: cargo build --release
+        run: cargo build --release --bin rwkv-pf --lib
+      - name: package
+        shell: bash
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          stage="dist/rwkv-prompt-format-${TAG}"
+          mkdir -p "$stage/bin" "$stage/lib" "$stage/include"
+          if [ -f target/release/rwkv-pf.exe ]; then
+            cp target/release/rwkv-pf.exe "$stage/bin/rwkv-pf.exe"
+          else
+            cp target/release/rwkv-pf "$stage/bin/rwkv-pf"
+          fi
+          for f in target/release/*.so target/release/*.dylib target/release/*.dll target/release/*.a target/release/*.lib; do
+            cp "$f" "$stage/lib/"
+          done
+          cp include/rwkv_prompt_format.h "$stage/include/"
+          cp LICENSE-MIT LICENSE-APACHE README.md README.zh-CN.md "$stage/"
+          printf 'User: hi\n\nAssistant:' | "$stage/bin/rwkv-pf" check --stdin --no-fail >/dev/null
+          (cd dist && tar -czf "rwkv-prompt-format-${TAG}-${TARGET}.tar.gz" "rwkv-prompt-format-${TAG}")
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  wasm:
+    name: build wasm bundle
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: build wasm
+        run: node scripts/build-wasm.mjs
+      - name: package
+        shell: bash
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          stage="dist/rwkv-prompt-format-wasm-${TAG}"
+          mkdir -p "$stage"
+          cp wasm/rwkv_prompt_format.wasm wasm/cli.mjs wasm/index.mjs wasm/index.d.ts "$stage/"
+          cp wasm/rwkv_prompt_format.wasm "dist/rwkv_prompt_format.wasm"
+          (cd dist && tar -czf "rwkv-prompt-format-wasm-${TAG}.tar.gz" "rwkv-prompt-format-wasm-${TAG}")
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-wasm32-unknown-unknown
+          path: |
+            dist/*.tar.gz
+            dist/rwkv_prompt_format.wasm
+          if-no-files-found: error
+
+  release:
+    name: publish GitHub release
+    needs: [version, build, wasm]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bundle-*
+          merge-multiple: true
+          path: dist
+      - name: checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          node -e "
+            const { createHash } = require('node:crypto');
+            const { readdirSync, readFileSync, writeFileSync } = require('node:fs');
+            const files = readdirSync('.').filter((f) => f.endsWith('.tar.gz') || f.endsWith('.wasm')).sort();
+            const lines = files.map((f) => {
+              const h = createHash('sha256').update(readFileSync(f)).digest('hex');
+              return h + '  ' + f;
+            });
+            writeFileSync('SHA256SUMS.txt', lines.join('\n') + '\n');
+            console.log(lines.join('\n'));
+          "
+      - name: gh release create
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" dist/* --verify-tag --generate-notes --title "$TAG"
+
+  publish-crates:
+    name: publish to crates.io (opt-in)
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_crates == true
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked

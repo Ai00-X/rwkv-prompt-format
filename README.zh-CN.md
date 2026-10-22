@@ -6,6 +6,7 @@
 ![Rust](https://img.shields.io/badge/rust-edition%202024-orange)
 ![Node](https://img.shields.io/badge/node-%E2%89%A518-green)
 ![WASM](https://img.shields.io/badge/wasm-203%20KB-purple)
+![CI](https://github.com/Ai00-X/rwkv-prompt-format/actions/workflows/ci.yml/badge.svg)
 
 RWKV G1/G1x 提示词**格式检查器 + 自动修复器**，独立于推理运行时：纯文本输入，
 不加载模型、不碰 GPU、不读写磁盘。六种消费方式：
@@ -450,13 +451,40 @@ node scripts/install-agent.mjs --scope user --uninstall --yes   # 卸载
 cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings
 cargo build --release
 node scripts/build-wasm.mjs --check
+node scripts/check-wasm-fresh.mjs
 node scripts/verify.mjs
 printf 'User: hi\n\n\nAssistant:' | ./target/release/rwkv-pf fix --stdin
 node wasm/cli.mjs check --text "User: hi" --json
 ```
 
-`verify.mjs` 需要 `target/release/rwkv-pf` 和已提交的 WASM；CI 把上述命令按序
-串起来即可，当前未附 workflow 文件。
+`verify.mjs` 需要 `target/release/rwkv-pf` 和已提交的 WASM。
+
+## CI 与发布
+
+`.github/workflows/ci.yml` 在每次 push / PR 上跑：
+
+| Job | 卡什么 |
+|---|---|
+| `rust` | `cargo fmt --all -- --check`、`cargo clippy --all-targets --release -- -D warnings`、`cargo test --release` |
+| `wasm` | `node scripts/check-wasm-fresh.mjs` —— 已提交的 `.wasm` 是否还由当前源码编出来 |
+| `verify` | `node scripts/verify.mjs` —— 上面那 74 项常驻回归门禁 |
+
+WASM 这道门**刻意不做字节比较**：rustc 一升级，产物字节就可能变，而行为完全一样，
+纯字节门禁会在每次工具链升级后无差别变红，正好掩盖它本来要抓的东西。
+`check-wasm-fresh.mjs` 用当前源码现编一份，把同一批语料同时喂给两个产物：字节相同
+就报「一致」，字节不同只当提示（工具链漂移），**行为**不一致才失败。
+
+`.github/workflows/release.yml` 在 `v*` tag 上跑：
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+tag 与 `Cargo.toml` 版本号对不上就不发布；然后为 `x86_64-unknown-linux-gnu`、
+`aarch64-apple-darwin`、`x86_64-apple-darwin`、`x86_64-pc-windows-msvc` 编 CLI 与
+C ABI，打包 WASM，写 `SHA256SUMS.txt`，用 `gh release create` 建 Release。
+crates.io 发布是手动开关：`workflow_dispatch` 时给 `publish_crates=true`，
+并配好 `CARGO_REGISTRY_TOKEN` secret。
 
 ## 贡献
 

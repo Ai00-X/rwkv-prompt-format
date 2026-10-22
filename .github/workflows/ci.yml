@@ -1,0 +1,71 @@
+name: ci
+
+# 每次 push / PR 都跑三道门禁：
+#   rust   —— 格式 / clippy / test
+#   wasm   —— 已提交的 .wasm 是否还跟得上源码（语义对拍，字节只提示）
+#   verify —— 常驻回归门禁（74 项：Rust↔WASM 对拍、MCP 协议、安装器往返）
+#
+# verify.mjs 才是真正的「行为契约」门禁；cargo test 只是编译兜底
+# （本仓的断言全部在 scripts/verify.mjs 里，src/ 下没有 #[cfg(test)]）。
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  rust:
+    name: rust · fmt / clippy / test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+      - name: cargo clippy
+        run: cargo clippy --all-targets --release -- -D warnings
+      - name: cargo test
+        run: cargo test --release
+
+  wasm:
+    name: wasm · freshness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: committed wasm matches the current source
+        # 字节不同只提示（工具链漂移），语义不一致才失败——见 scripts/check-wasm-fresh.mjs
+        run: node scripts/check-wasm-fresh.mjs
+
+  verify:
+    name: verify · regression gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: cargo build --release
+        run: cargo build --release
+      - name: regression gate
+        run: node scripts/verify.mjs

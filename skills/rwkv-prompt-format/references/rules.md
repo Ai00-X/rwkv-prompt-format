@@ -57,7 +57,11 @@ The prompt must end at a generation point so the model knows where to continue:
 - chat: `Assistant:`
 - instruction: `Response:`
 
-It must be the last block, with nothing after it. A deliberate seed is allowed:
+It must be the last block, with nothing after it. **No trailing space**: the
+generation point is exactly `Assistant:` and the model generates the first
+token itself. A trailing space changes tokenization (`Assistant:` + `␠` vs
+`Assistant` + `: `), which pushes the model to emit a word without a leading
+space — off-distribution versus training. A deliberate seed is allowed:
 `Assistant: {"answer": ` — including the trailing space.
 
 Other common end states:
@@ -67,7 +71,7 @@ Other common end states:
 | `ENDS_ON_USER` | prompt ends on `User:`; add `Assistant:` |
 | `ENDS_ON_NON_ASSISTANT` | ends on a system/instruction/input block |
 | `MISSING_GENERATION_POINT` | no trailing assistant/response |
-| `GEN_PREFIX_TRAILING_SPACE` | `Assistant: ` with a stray space at the very end |
+| `GEN_PREFIX_TRAILING_SPACE` | `Assistant: ` with a stray space at the very end (warn) |
 | `SEEDED_GENERATION_POINT` | generation point has seed content (info, often valid) |
 
 ## 4. Chat vs instruction

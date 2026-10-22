@@ -52,6 +52,9 @@ same text. Do not loop it.
 - Instruction: `System: ...\n\nInstruction: ...\n\nInput: ...\n\nResponse:`.
 - The last line is the generation point: `Assistant:` for chat, `Response:` for
   instruction, with nothing after it (or a deliberate seed such as `{"answer": `).
+- The generation point carries **no trailing space** (`Assistant:`, not `Assistant: `).
+  A trailing space changes tokenization and pushes the model to emit a word
+  without a leading space; leave the first token to the model.
 - If a `System:` block exists, it comes first; merge multiple `System:` blocks.
 - Think: `Assistant: <think`, `Assistant: <think></think`, or
   `Assistant: <think>\n</think` — lowercase, verbatim. Hints `(think)`,

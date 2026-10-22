@@ -1574,8 +1574,11 @@ pub fn check(text: &str) -> FormatReport {
                 if think_like {
                     stats.think_prefix = check_think_prefix(&lines, last, &mut push, true);
                 } else {
-                    // 官方模板结尾是 `Assistant:`（无尾随空格）。本仓 compose 统一用
-                    // `Assistant: `（一个空格）且实测可用——这里只记录，不判错。
+                    // 官方模板结尾是 `Assistant:`（**无尾随空格**）：生成点后面不留
+                    // 任何空白，让模型自己生成首个 token。多一个空格会改变分词——
+                    // `Assistant:` + `␠` 与 `Assistant` + `: ` 不是同一组 token，
+                    // 模型续写时被迫生成**不带前导空格**的词，与训练分布不一致
+                    // （历史轮次里助手的话前面都有空格）。所以这里判 warn。
                     if last.rest.is_empty() {
                         if body_content {
                             push(
@@ -1599,7 +1602,7 @@ pub fn check(text: &str) -> FormatReport {
                             Severity::Warn,
                             last.line,
                             format!(
-                                "`{}:` 后是全角/不换行空格；官方用一个半角空格",
+                                "`{}:` 后是全角/不换行空格；官方结尾不留空白，让模型自己生成首个 token",
                                 label_name(last.label)
                             ),
                             evidence(lines[last.line - 1]),
@@ -1612,8 +1615,8 @@ pub fn check(text: &str) -> FormatReport {
                                 Severity::Warn,
                                 last.line,
                                 format!(
-                                    "`{}:` 后有 {n} 个空白；官方结尾不带尾随空格，\
-                                     本仓统一用一个半角空格",
+                                    "`{}:` 后有 {n} 个空白；官方结尾不留尾随空格，\
+                                     去掉这些空白让模型自己生成首个 token",
                                     label_name(last.label)
                                 ),
                                 evidence(lines[last.line - 1]),
@@ -1634,15 +1637,17 @@ pub fn check(text: &str) -> FormatReport {
                         } else {
                             push(
                                 "GEN_PREFIX_TRAILING_SPACE",
-                                Severity::Info,
+                                Severity::Warn,
                                 last.line,
                                 if last.label == Label::Assistant {
-                                    "官方 G1x 模板以 `Assistant:` 结尾（无尾随空格）；\
-                                     本仓 compose 统一用 `Assistant: `（一个空格），实测可用——\
-                                     保持全链路一致即可"
+                                    "官方 G1x 模板以 `Assistant:` 结尾（**无尾随空格**）：\
+                                     生成点后不留空白，让模型自己生成首个 token。\
+                                     多一个空格会改变分词——`Assistant:`+`␠` 与 `Assistant`+`: ` \
+                                     不是同一组 token，模型续写时被迫生成不带前导空格的词"
                                         .to_string()
                                 } else {
-                                    "官方示例以 `Response:` 结尾（无尾随空格）；这里多了一个尾随空格"
+                                    "官方示例以 `Response:` 结尾（无尾随空格）；\
+                                     这里多了一个尾随空格，去掉它让模型自己生成首个 token"
                                         .to_string()
                                 },
                                 format!("{}␠", evidence(lines[last.line - 1])),
@@ -1665,7 +1670,7 @@ pub fn check(text: &str) -> FormatReport {
                 "ENDS_ON_USER",
                 Severity::Error,
                 last.line,
-                "prompt 停在 `User:` 块；模型会续写用户发言而不是回答。末尾必须是 `Assistant: `"
+                "prompt 停在 `User:` 块；模型会续写用户发言而不是回答。末尾必须是 `Assistant:`"
                     .to_string(),
                 evidence(lines[last.line - 1]),
             ),

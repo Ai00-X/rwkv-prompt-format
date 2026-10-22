@@ -519,6 +519,11 @@ builds the WASM from the current source and replays the same corpus through both
 artifacts: identical bytes are reported, differing bytes are only a notice, and a
 **behavioural** difference fails the build.
 
+This is not hypothetical — the first CI run on GitHub built the WASM with rustc
+1.99.1 while the committed artifact came from rustc 1.95.0, so the bytes differed
+(`ab984656…` vs `8b6aaf42…`) with the behaviour identical. A byte gate would have
+failed that run for nothing.
+
 `.github/workflows/release.yml` runs on a `v*` tag:
 
 ```bash
